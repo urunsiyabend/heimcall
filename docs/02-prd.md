@@ -1,12 +1,12 @@
 # Product Requirements Document - Incident Management / On-call Platform
 
 Version: 0.1
-Product codename: Watchtower
+Product codename: Heimcall
 Owner: Siyabend Ürün
 
 ## 1. Summary
 
-Watchtower is an incident management and on-call platform for engineering teams. It receives alerts from external monitoring systems, deduplicates noisy signals, creates incidents, routes them to the correct service/team, notifies on-call responders, escalates if no one acknowledges, and records a complete timeline for operational learning.
+Heimcall is an incident management and on-call platform for engineering teams. It receives alerts from external monitoring systems, deduplicates noisy signals, creates incidents, routes them to the correct service/team, notifies on-call responders, escalates if no one acknowledges, and records a complete timeline for operational learning.
 
 The initial product is a mini PagerDuty / Opsgenie / Splunk On-Call style system built with Spring Cloud, Kafka, Redis, PostgreSQL, and Kubernetes.
 
@@ -105,7 +105,7 @@ Needs:
 
 ## Persona 1: Responder
 
-Siyabend is on call for the Backend Team. At 03:00, Payment API starts returning 500 errors. Watchtower receives a CRITICAL event, creates an incident, sends Siyabend a Telegram notification, and waits for ACK. Siyabend clicks ACK, investigates the incident, fixes the issue, and resolves it. The timeline shows every action.
+Siyabend is on call for the Backend Team. At 03:00, Payment API starts returning 500 errors. Heimcall receives a CRITICAL event, creates an incident, sends Siyabend a Telegram notification, and waits for ACK. Siyabend clicks ACK, investigates the incident, fixes the issue, and resolves it. The timeline shows every action.
 
 ## Persona 2: Team Admin
 
@@ -113,7 +113,7 @@ Ayşe manages the Backend Team. She creates a weekly schedule, adds three engine
 
 ## Persona 3: Integrator
 
-Ali owns monitoring. He creates a Grafana webhook integration, copies the generated integration key and routing key, and sends a test alert. Watchtower creates a test incident successfully.
+Ali owns monitoring. He creates a Grafana webhook integration, copies the generated integration key and routing key, and sends a test alert. Heimcall creates a test incident successfully.
 
 ## 7. Product Scope
 
@@ -181,7 +181,7 @@ As a team admin, I want every lifecycle action to be added to the timeline so th
 
 ## 8.3 Schedules and escalation
 
-As a team admin, I want to create an on-call schedule so that Watchtower knows who is responsible at a given time.
+As a team admin, I want to create an on-call schedule so that Heimcall knows who is responsible at a given time.
 
 As a team admin, I want to create an escalation policy so that incidents go to another responder if the first responder does not acknowledge.
 

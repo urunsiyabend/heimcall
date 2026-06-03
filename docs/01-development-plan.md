@@ -11,10 +11,12 @@ We are building a mini PagerDuty / Opsgenie / Splunk On-Call style platform. The
 This plan intentionally follows a textbook architecture path:
 
 1. Understand the domain and define ubiquitous language.
-2. Model bounded contexts before choosing service boundaries.
-3. Build a modular monolith-shaped domain first, then deploy as microservices where boundaries are stable.
+2. Model bounded contexts and map them directly to independent microservices.
+3. Build separate Spring Boot services from day one, each owning its database/schema and communicating via REST and Kafka events.
 4. Use event-driven architecture for lifecycle actions.
 5. Use Kubernetes, Kafka, Redis, and Spring Cloud for production-like distributed-system behavior.
+
+Architecture decision: this project goes microservices-first. We do NOT start as a modular monolith. Each bounded context in section 4 is implemented as its own deployable service with its own datastore from the first sprint. Trade-off accepted: more upfront operational complexity (multiple services, Kafka contracts, distributed debugging) in exchange for clean service boundaries and a production-like distributed system as a learning goal.
 
 ## 2. Inspiration from Existing Systems
 
@@ -251,10 +253,11 @@ reporting-service
 
 Use Spring Boot for each service.
 
-Recommended baseline:
+Locked baseline:
 
 - Java 21
-- Spring Boot 3.x
+- Spring Boot 3.3.x
+- Gradle multi-project; shared config via a root `subprojects {}` block (not `build-logic` convention plugins — kept simple, extract later if it grows)
 - Spring Security
 - Spring Data JPA
 - Spring Validation
@@ -320,11 +323,11 @@ Do not use Redis as the source of truth for incidents, alerts, schedules, or esc
 
 Use PostgreSQL as the system of record.
 
-Suggested pattern:
+Pattern (microservices-first):
 
-- Database per service for true microservices.
-- Schema per service for early development if operational simplicity matters.
-- Never share tables directly between services.
+- Database per service. Each service owns its own logical database and migrations.
+- For local dev, run one PostgreSQL instance with one database per service (cheap parity, still no shared tables).
+- Never share tables directly between services. Cross-service reads happen via REST or Kafka events, never via the other service's tables.
 
 ## 6.6 Kubernetes
 
@@ -465,15 +468,20 @@ External provider sends RECOVERY for entityId
 
 Goal: build the skeleton.
 
+Decisions locked:
+
+- Monorepo (single git repo, multiple deployable services).
+- Gradle multi-project build: each service in `services/*` is its own Gradle subproject; shared code in `libs/*`.
+- Convert the current single-module `heimcall` skeleton into the multi-project layout (root settings.gradle includes all subprojects; common config via a convention plugin / shared build logic).
+
 Deliverables:
 
-- Monorepo or multi-repo decision
-- Maven multi-module or Gradle convention
+- Gradle multi-project conversion (root + `services/*` + `libs/*` subprojects)
 - Docker Compose for local dependencies
 - Kubernetes namespace and base manifests
-- API Gateway skeleton
+- API Gateway skeleton (Spring Cloud Gateway)
 - Shared libraries for errors, tracing, events, and test utilities
-- PostgreSQL, Kafka, Redis local setup
+- PostgreSQL (database-per-service), Kafka, Redis local setup
 - OpenAPI generation baseline
 
 Recommended local dependencies:
@@ -852,7 +860,7 @@ Use Testcontainers for:
 
 | Risk | Mitigation |
 | --- | --- |
-| Microservices become too complex early | Keep domain modular; split only stable boundaries |
+| Microservices add operational complexity early (chosen trade-off) | Strong bounded-context discipline, shared libs for cross-cutting concerns, Docker Compose + Testcontainers for local parity, contract tests on every service boundary |
 | Kafka event duplication | Idempotent consumers and event ids |
 | Escalation double execution | DB state check + Redis lock + task status transition |
 | Notification provider outages | Retry, circuit breaker, fallback channel |
