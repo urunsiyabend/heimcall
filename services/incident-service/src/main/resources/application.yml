@@ -1,0 +1,33 @@
+server:
+  port: 8082
+
+spring:
+  application:
+    name: incident-service
+  datasource:
+    url: ${DB_URL:jdbc:postgresql://localhost:5432/incident}
+    username: ${DB_USERNAME:incident}
+    password: ${DB_PASSWORD:incident}
+  jpa:
+    hibernate:
+      ddl-auto: validate
+    open-in-view: false
+  flyway:
+    enabled: true
+  kafka:
+    bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
+    consumer:
+      group-id: incident-service.alert-received-consumer
+      auto-offset-reset: earliest
+      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      value-deserializer: org.springframework.kafka.support.serializer.JsonDeserializer
+      properties:
+        spring.json.trusted.packages: "com.urunsiyabend.heimcall.common.events,com.urunsiyabend.heimcall.common.domain"
+        spring.json.value.default.type: com.urunsiyabend.heimcall.common.events.AlertReceivedEvent
+        spring.json.use.type.headers: false
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info

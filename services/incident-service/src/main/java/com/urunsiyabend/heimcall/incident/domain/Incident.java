@@ -1,0 +1,157 @@
+package com.urunsiyabend.heimcall.incident.domain;
+
+import com.urunsiyabend.heimcall.common.domain.IncidentStatus;
+import com.urunsiyabend.heimcall.common.domain.Severity;
+import jakarta.persistence.Column;
+import jakarta.persistence.Entity;
+import jakarta.persistence.EnumType;
+import jakarta.persistence.Enumerated;
+import jakarta.persistence.Id;
+import jakarta.persistence.Table;
+
+import java.time.Instant;
+import java.util.UUID;
+
+@Entity
+@Table(name = "incident")
+public class Incident {
+
+    @Id
+    private UUID id;
+
+    @Column(name = "organization_id", nullable = false)
+    private UUID organizationId;
+
+    @Column(nullable = false)
+    private String source;
+
+    @Column(name = "dedup_key", nullable = false)
+    private String dedupKey;
+
+    @Column(name = "external_entity_id")
+    private String externalEntityId;
+
+    @Column(nullable = false)
+    private String title;
+
+    @Column(columnDefinition = "text")
+    private String description;
+
+    @Enumerated(EnumType.STRING)
+    @Column(nullable = false)
+    private Severity severity;
+
+    @Enumerated(EnumType.STRING)
+    @Column(nullable = false)
+    private IncidentStatus status;
+
+    @Column(name = "alert_count", nullable = false)
+    private int alertCount;
+
+    @Column(name = "created_at", nullable = false)
+    private Instant createdAt;
+
+    @Column(name = "updated_at", nullable = false)
+    private Instant updatedAt;
+
+    @Column(name = "last_event_at", nullable = false)
+    private Instant lastEventAt;
+
+    protected Incident() {
+    }
+
+    public static Incident trigger(UUID organizationId, String source, String dedupKey,
+                                   String externalEntityId, String title, String description,
+                                   Severity severity, Instant occurredAt) {
+        Incident incident = new Incident();
+        incident.id = UUID.randomUUID();
+        incident.organizationId = organizationId;
+        incident.source = source;
+        incident.dedupKey = dedupKey;
+        incident.externalEntityId = externalEntityId;
+        incident.title = title;
+        incident.description = description;
+        incident.severity = severity != null ? severity : Severity.WARNING;
+        incident.status = IncidentStatus.TRIGGERED;
+        incident.alertCount = 1;
+        incident.createdAt = occurredAt;
+        incident.updatedAt = occurredAt;
+        incident.lastEventAt = occurredAt;
+        return incident;
+    }
+
+    /** Collapse a duplicate signal onto this incident. */
+    public void registerDuplicate(Instant occurredAt) {
+        this.alertCount += 1;
+        this.lastEventAt = occurredAt;
+        this.updatedAt = occurredAt;
+    }
+
+    public void acknowledge(Instant at) {
+        this.status = IncidentStatus.ACKNOWLEDGED;
+        this.updatedAt = at;
+        this.lastEventAt = at;
+    }
+
+    public void resolve(Instant at) {
+        this.status = IncidentStatus.RESOLVED;
+        this.updatedAt = at;
+        this.lastEventAt = at;
+    }
+
+    public boolean isOpen() {
+        return status == IncidentStatus.TRIGGERED || status == IncidentStatus.ACKNOWLEDGED;
+    }
+
+    public UUID getId() {
+        return id;
+    }
+
+    public UUID getOrganizationId() {
+        return organizationId;
+    }
+
+    public String getSource() {
+        return source;
+    }
+
+    public String getDedupKey() {
+        return dedupKey;
+    }
+
+    public String getExternalEntityId() {
+        return externalEntityId;
+    }
+
+    public String getTitle() {
+        return title;
+    }
+
+    public String getDescription() {
+        return description;
+    }
+
+    public Severity getSeverity() {
+        return severity;
+    }
+
+    public IncidentStatus getStatus() {
+        return status;
+    }
+
+    public int getAlertCount() {
+        return alertCount;
+    }
+
+    public Instant getCreatedAt() {
+        return createdAt;
+    }
+
+    public Instant getUpdatedAt() {
+        return updatedAt;
+    }
+
+    public Instant getLastEventAt() {
+        return lastEventAt;
+    }
+}
