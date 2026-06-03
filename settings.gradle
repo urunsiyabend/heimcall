@@ -1,0 +1,14 @@
+plugins {
+    // Lets Gradle resolve/download the Java 21 toolchain if it is not already installed.
+    id 'org.gradle.toolchains.foojay-resolver-convention' version '0.8.0'
+}
+
+rootProject.name = 'heimcall'
+
+include 'libs:common-domain'
+include 'libs:common-events'
+include 'libs:test-support'
+
+include 'services:api-gateway'
+include 'services:integration-service'
+include 'services:incident-service'

@@ -1,0 +1,906 @@
+# Incident Management / On-call Platform - Development Plan
+
+Version: 0.1
+Owner: Siyabend Ürün
+Stack: Spring Boot, Spring Cloud, Kafka, Redis, PostgreSQL, Kubernetes
+
+## 1. Product Direction
+
+We are building a mini PagerDuty / Opsgenie / Splunk On-Call style platform. The product receives operational signals from external systems, normalizes them into alerts, creates or updates incidents, routes incidents to the correct service/team, notifies the current on-call responder, escalates if no one acknowledges, and preserves a timeline of every meaningful action.
+
+This plan intentionally follows a textbook architecture path:
+
+1. Understand the domain and define ubiquitous language.
+2. Model bounded contexts before choosing service boundaries.
+3. Build a modular monolith-shaped domain first, then deploy as microservices where boundaries are stable.
+4. Use event-driven architecture for lifecycle actions.
+5. Use Kubernetes, Kafka, Redis, and Spring Cloud for production-like distributed-system behavior.
+
+## 2. Inspiration from Existing Systems
+
+### PagerDuty-inspired principles
+
+- A service is connected to an escalation policy.
+- Escalation policies automate incident assignment.
+- Escalation policies notify one target at a time until someone acknowledges.
+- Schedules define who is on call.
+
+### Opsgenie-inspired principles
+
+- Alert management is a first-class concern.
+- Deduplication prevents repeated alerts from becoming repeated incidents.
+- Escalation depends on alert or incident state, especially whether it is acknowledged or closed.
+- Teams, schedules, routing rules, and escalation policies work together.
+
+### Splunk On-Call / VictorOps-inspired principles
+
+- External integrations should accept generic JSON events.
+- Events may trigger, acknowledge, update, or recover an incident.
+- External identity fields such as entity id should map to deduplication keys.
+- Routing keys should direct payloads toward the correct service/team/policy.
+
+## 3. Architecture Principles
+
+### 3.1 Core principles
+
+- Domain-first design.
+- Explicit lifecycle states.
+- Idempotent commands.
+- Event-driven integration between bounded contexts.
+- Append-only timeline for observability and audit.
+- Async processing for incident actions where appropriate.
+- Resilience around notification providers.
+- Tenant isolation from day one.
+
+### 3.2 Non-negotiable engineering rules
+
+- Every external payload must be normalized before domain processing.
+- Every lifecycle command must be idempotent.
+- Every incident action must create a timeline event.
+- Escalation workers must re-check incident state before notifying.
+- Notification delivery must be tracked separately from incident state.
+- Kafka consumers must be retry-safe.
+- Failed messages must go to a dead-letter topic.
+- Distributed scheduled work must be lock-safe.
+- Cache must never be the source of truth.
+
+## 4. Proposed Bounded Contexts
+
+## 4.1 Identity & Access Context
+
+Responsibilities:
+
+- Organizations
+- Users
+- Roles
+- Memberships
+- API keys
+- Integration keys
+- Authentication and authorization
+
+Suggested service: `identity-service`
+
+Main entities:
+
+- Organization
+- User
+- Membership
+- Role
+- ApiKey
+- IntegrationKey
+
+## 4.2 Service Catalog Context
+
+Responsibilities:
+
+- Monitored services
+- Service ownership
+- Team-service relationship
+- Service escalation policy assignment
+
+Suggested service: `service-catalog-service`
+
+Main entities:
+
+- MonitoredService
+- ServiceOwnership
+- ServiceTag
+
+## 4.3 Integration Context
+
+Responsibilities:
+
+- Generic webhook ingestion
+- Provider-specific integrations
+- Payload normalization
+- Routing key resolution
+- Validation and authentication of inbound alerts
+
+Suggested service: `integration-service`
+
+Main entities:
+
+- Integration
+- RoutingKey
+- RawInboundEvent
+- NormalizedAlertEvent
+
+## 4.4 Alert & Incident Context
+
+Responsibilities:
+
+- Alert creation
+- Deduplication
+- Incident lifecycle
+- Acknowledge, resolve, cancel, reopen rules
+- Assignment
+- Timeline production
+
+Suggested service: `incident-service`
+
+Main entities:
+
+- Alert
+- Incident
+- IncidentTimelineEvent
+- IncidentAssignment
+
+## 4.5 On-call Scheduling Context
+
+Responsibilities:
+
+- Schedules
+- Rotations
+- Participants
+- Overrides
+- Current on-call calculation
+
+Suggested service: `schedule-service`
+
+Main entities:
+
+- OnCallSchedule
+- ScheduleRotation
+- RotationParticipant
+- ScheduleOverride
+
+## 4.6 Escalation Context
+
+Responsibilities:
+
+- Escalation policies
+- Escalation steps/rules
+- Escalation task scheduling
+- Escalation execution
+- Repeat logic
+
+Suggested service: `escalation-service`
+
+Main entities:
+
+- EscalationPolicy
+- EscalationRule
+- EscalationTask
+- EscalationExecution
+
+## 4.7 Notification Context
+
+Responsibilities:
+
+- Notification requests
+- User contact methods
+- Channel preferences
+- Provider integrations
+- Delivery attempts
+- Retry and failure handling
+
+Suggested service: `notification-service`
+
+Main entities:
+
+- NotificationRequest
+- NotificationDelivery
+- ContactMethod
+- NotificationChannel
+
+## 4.8 Timeline & Audit Context
+
+Responsibilities:
+
+- Incident timeline
+- Audit log
+- User actions
+- System actions
+- Immutable event history
+
+Suggested service: can start inside `incident-service`, later split into `timeline-service`.
+
+## 5. Suggested Microservice Topology
+
+MVP topology:
+
+```text
+api-gateway
+identity-service
+integration-service
+incident-service
+schedule-service
+escalation-service
+notification-service
+```
+
+Later topology:
+
+```text
+api-gateway
+identity-service
+service-catalog-service
+integration-service
+alert-service
+incident-service
+schedule-service
+escalation-service
+notification-service
+timeline-service
+reporting-service
+```
+
+## 6. Technology Choices
+
+## 6.1 Spring Boot
+
+Use Spring Boot for each service.
+
+Recommended baseline:
+
+- Java 21
+- Spring Boot 3.x
+- Spring Security
+- Spring Data JPA
+- Spring Validation
+- Spring Actuator
+- Flyway or Liquibase
+- Testcontainers
+
+## 6.2 Spring Cloud Gateway
+
+Use as the external API entry point.
+
+Responsibilities:
+
+- Routing
+- Authentication filter
+- Rate limiting
+- Request correlation id
+- CORS
+- Basic request logging
+
+## 6.3 Spring Cloud Stream + Kafka
+
+Use Kafka as the event backbone.
+
+Responsibilities:
+
+- Incident lifecycle events
+- Notification requests
+- Escalation tasks
+- Timeline events
+- Integration payload events
+
+Topic examples:
+
+```text
+alert.received.v1
+incident.triggered.v1
+incident.acknowledged.v1
+incident.resolved.v1
+escalation.requested.v1
+notification.requested.v1
+notification.delivered.v1
+notification.failed.v1
+timeline.event-created.v1
+```
+
+## 6.4 Redis
+
+Use Redis for ephemeral and coordination-heavy data.
+
+Use cases:
+
+- API rate limiting counters
+- Idempotency key cache
+- Short-lived deduplication acceleration
+- Distributed locks for scheduled workers
+- Current on-call calculation cache
+- Notification cooldown cache
+
+Do not use Redis as the source of truth for incidents, alerts, schedules, or escalations.
+
+## 6.5 PostgreSQL
+
+Use PostgreSQL as the system of record.
+
+Suggested pattern:
+
+- Database per service for true microservices.
+- Schema per service for early development if operational simplicity matters.
+- Never share tables directly between services.
+
+## 6.6 Kubernetes
+
+Use Kubernetes for production-like deployment.
+
+Core resources:
+
+- Deployment
+- Service
+- ConfigMap
+- Secret
+- Ingress
+- HorizontalPodAutoscaler
+- PodDisruptionBudget
+- NetworkPolicy
+- ServiceAccount
+
+Recommended local setup:
+
+- kind or k3d
+- Helm charts
+- Skaffold or Tilt for inner loop
+
+## 7. High-level Runtime Flow
+
+### 7.1 Trigger flow
+
+```text
+External Monitoring System
+  -> POST /v1/integrations/{integrationKey}/events/{routingKey}
+  -> API Gateway
+  -> integration-service validates and normalizes payload
+  -> publishes alert.received.v1
+  -> incident-service consumes event
+  -> deduplication check
+  -> creates or updates Alert
+  -> creates or updates Incident
+  -> publishes incident.triggered.v1
+  -> escalation-service consumes incident.triggered.v1
+  -> resolves first escalation target
+  -> publishes notification.requested.v1
+  -> notification-service sends notification
+  -> publishes notification.delivered.v1 or notification.failed.v1
+  -> timeline event recorded
+```
+
+### 7.2 Acknowledge flow
+
+```text
+Responder clicks ACK
+  -> POST /v1/incidents/{id}/acknowledge
+  -> incident-service validates transition
+  -> incident status becomes ACKNOWLEDGED
+  -> publishes incident.acknowledged.v1
+  -> escalation-service cancels pending escalation tasks
+  -> timeline event recorded
+```
+
+### 7.3 Resolve flow
+
+```text
+Responder resolves incident
+  -> POST /v1/incidents/{id}/resolve
+  -> incident-service validates transition
+  -> incident status becomes RESOLVED
+  -> publishes incident.resolved.v1
+  -> escalation-service cancels pending escalation tasks
+  -> timeline event recorded
+```
+
+### 7.4 Recovery event flow
+
+```text
+External provider sends RECOVERY for entityId
+  -> integration-service normalizes payload
+  -> incident-service finds open incident by source + entityId
+  -> resolves incident automatically
+  -> timeline event recorded
+```
+
+## 8. Domain Event Contracts
+
+## 8.1 AlertReceivedEvent
+
+```json
+{
+  "eventId": "uuid",
+  "occurredAt": "2026-06-03T12:00:00Z",
+  "organizationId": "uuid",
+  "integrationId": "uuid",
+  "routingKey": "backend-critical",
+  "source": "grafana",
+  "messageType": "CRITICAL",
+  "externalEntityId": "payment-api-5xx-rate",
+  "dedupKey": "grafana:payment-api-5xx-rate",
+  "title": "Payment API 5xx rate high",
+  "description": "Error rate exceeded 5% for 5 minutes",
+  "severity": "CRITICAL",
+  "metadata": {
+    "env": "production",
+    "region": "eu-central-1"
+  }
+}
+```
+
+## 8.2 IncidentTriggeredEvent
+
+```json
+{
+  "eventId": "uuid",
+  "occurredAt": "2026-06-03T12:00:01Z",
+  "organizationId": "uuid",
+  "incidentId": "uuid",
+  "serviceId": "uuid",
+  "escalationPolicyId": "uuid",
+  "severity": "CRITICAL",
+  "dedupKey": "grafana:payment-api-5xx-rate"
+}
+```
+
+## 8.3 NotificationRequestedEvent
+
+```json
+{
+  "eventId": "uuid",
+  "occurredAt": "2026-06-03T12:00:02Z",
+  "organizationId": "uuid",
+  "incidentId": "uuid",
+  "recipientUserId": "uuid",
+  "channel": "EMAIL",
+  "reason": "ESCALATION_LEVEL_1"
+}
+```
+
+## 9. Development Phases
+
+## Phase 0 - Repository and Platform Foundation
+
+Goal: build the skeleton.
+
+Deliverables:
+
+- Monorepo or multi-repo decision
+- Maven multi-module or Gradle convention
+- Docker Compose for local dependencies
+- Kubernetes namespace and base manifests
+- API Gateway skeleton
+- Shared libraries for errors, tracing, events, and test utilities
+- PostgreSQL, Kafka, Redis local setup
+- OpenAPI generation baseline
+
+Recommended local dependencies:
+
+```text
+PostgreSQL
+Kafka + Schema Registry optional
+Redis
+Mailhog
+Keycloak optional
+Prometheus + Grafana optional
+```
+
+## Phase 1 - Identity, Teams, and Service Catalog
+
+Goal: model who owns what.
+
+Deliverables:
+
+- Organization CRUD
+- User CRUD
+- Team CRUD
+- Team membership
+- MonitoredService CRUD
+- Assign service to team
+- Assign service to escalation policy placeholder
+- API key generation for integrations
+
+Acceptance focus:
+
+- Only organization members can access organization data.
+- A service must belong to one organization.
+- A service can be owned by a team.
+
+## Phase 2 - Integration Ingestion and Alert Normalization
+
+Goal: accept external signals.
+
+Deliverables:
+
+- Generic webhook endpoint
+- Integration key validation
+- Routing key support
+- Raw inbound event storage
+- Normalized AlertReceivedEvent publication
+- Provider message type mapping
+
+Supported message types:
+
+```text
+CRITICAL
+WARNING
+INFO
+ACKNOWLEDGEMENT
+RECOVERY
+```
+
+Acceptance focus:
+
+- Invalid integration key is rejected.
+- Valid payload becomes normalized event.
+- Recovery event does not create a new incident if no open incident exists.
+
+## Phase 3 - Incident Lifecycle and Deduplication
+
+Goal: create the core incident engine.
+
+Deliverables:
+
+- Alert table
+- Incident table
+- Deduplication by organization + source + external entity id / dedup key
+- Incident trigger, acknowledge, resolve, cancel endpoints
+- Timeline event creation
+- IncidentTriggeredEvent, IncidentAcknowledgedEvent, IncidentResolvedEvent
+
+Acceptance focus:
+
+- Repeated CRITICAL event with same dedup key updates existing open incident.
+- ACK stops escalation eligibility.
+- RESOLVED incident is not mutated by another CRITICAL event; a new incident may be opened depending on reopen policy.
+
+## Phase 4 - Scheduling
+
+Goal: calculate current on-call responders.
+
+Deliverables:
+
+- Schedule CRUD
+- Rotation CRUD
+- Participants
+- Weekly rotation support
+- Daily rotation support
+- Current on-call endpoint
+- Override support
+- Timezone-aware calculations
+
+Acceptance focus:
+
+- Weekly rotation returns the correct participant.
+- Override takes priority over base rotation.
+- Timezone is respected.
+
+## Phase 5 - Escalation Engine
+
+Goal: notify the right people in order.
+
+Deliverables:
+
+- Escalation policy CRUD
+- Escalation rule CRUD
+- Rule targets: USER, SCHEDULE, TEAM
+- EscalationTask table
+- Escalation worker
+- Kafka-driven incident trigger handling
+- Pending task cancellation on ACK/RESOLVE
+- Repeat support optional
+
+Acceptance focus:
+
+- Level 1 notification is requested immediately.
+- If no ACK before wait duration, Level 2 notification is requested.
+- If incident is ACKNOWLEDGED before task execution, task is canceled.
+
+## Phase 6 - Notification Delivery
+
+Goal: send messages reliably.
+
+Deliverables:
+
+- Email channel
+- Telegram channel
+- Webhook channel
+- Delivery attempt log
+- Retry policy
+- Provider timeout handling
+- Dead-letter handling
+- Notification preferences basic model
+
+Acceptance focus:
+
+- Delivery success is recorded.
+- Failed delivery retries with bounded attempts.
+- Failed messages are visible operationally.
+
+## Phase 7 - UI and Realtime Collaboration
+
+Goal: make the product usable.
+
+Deliverables:
+
+- Incident list
+- Incident detail
+- Timeline
+- ACK and resolve buttons
+- Service management
+- Schedule management
+- Escalation policy editor
+- WebSocket/SSE incident updates
+
+Recommended frontend:
+
+- React + Vite
+- TypeScript
+- OpenAPI-generated client
+
+## Phase 8 - Observability and Production Readiness
+
+Goal: make the system operable.
+
+Deliverables:
+
+- Structured logging
+- Correlation ids
+- OpenTelemetry traces
+- Prometheus metrics
+- Grafana dashboards
+- Kubernetes probes
+- HPA
+- Kafka lag dashboards
+- Redis and PostgreSQL dashboards
+- Runbooks
+
+Important metrics:
+
+```text
+incident_triggered_total
+incident_acknowledged_total
+incident_resolved_total
+incident_time_to_ack_seconds
+incident_time_to_resolve_seconds
+notification_delivery_success_total
+notification_delivery_failure_total
+escalation_task_executed_total
+kafka_consumer_lag
+```
+
+## 10. Suggested Repository Structure
+
+```text
+incident-platform/
+  services/
+    api-gateway/
+    identity-service/
+    integration-service/
+    incident-service/
+    schedule-service/
+    escalation-service/
+    notification-service/
+  libs/
+    common-domain/
+    common-events/
+    common-security/
+    common-observability/
+    test-support/
+  deploy/
+    docker-compose/
+    kubernetes/
+    helm/
+  docs/
+    architecture/
+    api/
+    adr/
+    domain/
+```
+
+## 11. API Design Conventions
+
+Use versioned APIs:
+
+```text
+/v1/incidents
+/v1/services
+/v1/schedules
+/v1/escalation-policies
+/v1/integrations
+```
+
+Use command-style subresources for lifecycle transitions:
+
+```http
+POST /v1/incidents/{incidentId}/acknowledge
+POST /v1/incidents/{incidentId}/resolve
+POST /v1/incidents/{incidentId}/cancel
+POST /v1/incidents/{incidentId}/reassign
+```
+
+Use idempotency keys for external and lifecycle commands:
+
+```http
+Idempotency-Key: client-generated-key
+```
+
+## 12. Kafka Topic Design
+
+Naming convention:
+
+```text
+<context>.<event-name>.v<version>
+```
+
+Examples:
+
+```text
+alert.received.v1
+incident.triggered.v1
+incident.acknowledged.v1
+incident.resolved.v1
+escalation.task-due.v1
+notification.requested.v1
+notification.delivered.v1
+notification.failed.v1
+```
+
+Consumer group examples:
+
+```text
+incident-service.alert-received-consumer
+escalation-service.incident-triggered-consumer
+notification-service.notification-requested-consumer
+timeline-service.domain-event-consumer
+```
+
+## 13. Redis Usage Plan
+
+Keys:
+
+```text
+idempotency:{organizationId}:{key}
+rate-limit:{organizationId}:{apiKey}
+oncall-cache:{scheduleId}:{instantBucket}
+notification-cooldown:{incidentId}:{userId}:{channel}
+lock:escalation-worker:{taskShard}
+```
+
+TTL rules:
+
+```text
+Idempotency keys: 24 hours
+Rate limit keys: 1 minute windows
+On-call cache: 1-5 minutes
+Notification cooldown: configurable, e.g. 1 minute
+Distributed locks: short TTL, e.g. 30 seconds
+```
+
+## 14. Kubernetes Deployment Plan
+
+Namespace structure:
+
+```text
+incident-dev
+incident-staging
+incident-prod
+```
+
+Each service should define:
+
+- Deployment
+- Service
+- ConfigMap
+- Secret references
+- Readiness probe
+- Liveness probe
+- Resource requests/limits
+- HorizontalPodAutoscaler
+
+Readiness examples:
+
+- API service must connect to database.
+- Kafka-consuming service must start successfully but should not block readiness forever on temporary broker issues.
+- Notification service readiness should not depend on all third-party providers being reachable.
+
+## 15. Security Plan
+
+- JWT for user APIs.
+- API keys for integration endpoints.
+- Hashed integration keys in database.
+- RBAC by organization/team role.
+- Secret management via Kubernetes Secrets for dev, external secret manager for production.
+- Audit all privileged changes.
+- Rate limit integration endpoints.
+- Validate and size-limit inbound payloads.
+
+## 16. Testing Strategy
+
+### Unit tests
+
+- Domain state transitions
+- Deduplication rules
+- Rotation calculations
+- Escalation task decisions
+- Notification retry decisions
+
+### Integration tests
+
+Use Testcontainers for:
+
+- PostgreSQL
+- Kafka
+- Redis
+
+### Contract tests
+
+- Public REST APIs
+- Kafka event schemas
+- Webhook payload compatibility
+
+### End-to-end tests
+
+- Trigger to notification flow
+- ACK cancels escalation
+- Recovery resolves incident
+- Duplicate alert increments count
+
+## 17. Risks and Mitigations
+
+| Risk | Mitigation |
+| --- | --- |
+| Microservices become too complex early | Keep domain modular; split only stable boundaries |
+| Kafka event duplication | Idempotent consumers and event ids |
+| Escalation double execution | DB state check + Redis lock + task status transition |
+| Notification provider outages | Retry, circuit breaker, fallback channel |
+| Schedule calculation bugs | Heavy unit testing with timezone cases |
+| Deduplication mistakes | Strong unique indexes and explicit dedup key policy |
+| Tenant data leaks | Organization id in every aggregate and query |
+
+## 18. Definition of Done
+
+A feature is done when:
+
+- Domain rule is documented.
+- API contract is defined.
+- Database migration exists.
+- Unit tests cover domain behavior.
+- Integration tests cover database/event interaction.
+- Timeline event is created where applicable.
+- Observability metrics/logs are added.
+- OpenAPI docs are updated.
+- Kubernetes config is updated if needed.
+- Acceptance tests pass.
+
+## 19. Recommended First Sprint
+
+Sprint 1 goal: create the skeleton and trigger a fake incident end-to-end without real notification.
+
+Tasks:
+
+1. Create repository structure.
+2. Create api-gateway, integration-service, incident-service.
+3. Run PostgreSQL, Kafka, Redis using Docker Compose.
+4. Implement generic webhook endpoint.
+5. Publish `alert.received.v1`.
+6. Consume event in incident-service.
+7. Create alert and incident.
+8. Implement deduplication by dedup key.
+9. Add timeline table.
+10. Add basic incident list endpoint.
+
+Sprint 1 success demo:
+
+```text
+curl POST /v1/integrations/{integrationKey}/events/backend-critical
+  -> incident appears in database
+  -> duplicate payload increments alert count
+  -> timeline shows trigger and duplicate events
+```
+
+## 20. Source Notes
+
+This plan is informed by public behavior and terminology from PagerDuty, Opsgenie, and Splunk On-Call / VictorOps documentation, especially around services, escalation policies, schedules, alert notification flow, deduplication, routing keys, entity IDs, and incident lifecycle actions.
