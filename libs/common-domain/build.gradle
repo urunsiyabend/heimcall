@@ -1,0 +1,3 @@
+// Plain Java library: shared enums, ids, and error types. No Spring Boot plugin (not runnable).
+dependencies {
+}

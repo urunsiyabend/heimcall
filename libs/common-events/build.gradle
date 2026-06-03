@@ -1,0 +1,6 @@
+// Shared Kafka event contracts. java-library so domain types leak transitively via `api`.
+apply plugin: 'java-library'
+
+dependencies {
+    api project(':libs:common-domain')
+}

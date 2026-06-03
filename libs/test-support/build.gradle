@@ -1,0 +1,10 @@
+// Shared test fixtures: Testcontainers base classes for PostgreSQL, Kafka, Redis.
+apply plugin: 'java-library'
+
+dependencies {
+    api platform('org.testcontainers:testcontainers-bom:1.20.4')
+    api 'org.testcontainers:junit-jupiter'
+    api 'org.testcontainers:postgresql'
+    api 'org.testcontainers:kafka'
+    api 'org.springframework.boot:spring-boot-starter-test'
+}
