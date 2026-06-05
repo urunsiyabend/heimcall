@@ -564,6 +564,31 @@ Acceptance focus:
 - ACK stops escalation eligibility.
 - RESOLVED incident is not mutated by another CRITICAL event; a new incident may be opened depending on reopen policy.
 
+## Phase 3.5 - Reliability and Idempotency
+
+Goal: make the alert -> incident path safe under Kafka failures and redelivery. Inserted after Phase 3 because the core consumer is where these failure modes first bite. Should be done before adding more consumers (escalation, notification), not deferred to the end.
+
+Background: the Sprint 1 slice is deliberately at-most-once on the producer and not idempotent on the consumer. Known gaps to close here:
+
+- Producer is fire-and-forget: integration-service returns 202 before confirming the Kafka write, so a broker outage silently drops the event.
+- Consumer is not idempotent: Kafka redelivers on rebalance/retry, and reprocessing the same event increments alertCount again (count inflation). This is a correctness bug, not just resilience.
+- No retry policy or dead-letter topic: a poison-pill message can block the partition.
+- Raw inbound payloads are not stored, so a publish failure leaves no trace and no replay path.
+
+Deliverables:
+
+- Producer reliability: acks=all, send callback, fail the HTTP request (5xx) when the publish is not confirmed. Optionally a transactional outbox so DB write and event publish are consistent.
+- Consumer idempotency: a processed_event(event_id) table (or Redis key with TTL); skip events already handled.
+- Retry + dead-letter: bounded retry, then route to <topic>.DLT with the failure reason.
+- RawInboundEvent storage in integration-service for audit and replay.
+- Poison-pill handling: ErrorHandlingDeserializer so a malformed payload goes to DLT instead of crashing the listener.
+
+Acceptance focus:
+
+- Redelivering the same AlertReceivedEvent does not change alertCount or create a second timeline event.
+- A broker outage during ingestion is surfaced to the caller (no silent loss).
+- A malformed message lands in the DLT and the consumer keeps processing the next message.
+
 ## Phase 4 - Scheduling
 
 Goal: calculate current on-call responders.
