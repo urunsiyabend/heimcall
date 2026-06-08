@@ -20,8 +20,12 @@ spring:
       group-id: incident-service.alert-received-consumer
       auto-offset-reset: earliest
       key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
-      value-deserializer: org.springframework.kafka.support.serializer.JsonDeserializer
+      # ErrorHandlingDeserializer wraps the JSON deserializer so a malformed payload
+      # surfaces as a DeserializationException (-> routed to the DLT) instead of
+      # crashing the listener and blocking the partition.
+      value-deserializer: org.springframework.kafka.support.serializer.ErrorHandlingDeserializer
       properties:
+        spring.deserializer.value.delegate.class: org.springframework.kafka.support.serializer.JsonDeserializer
         spring.json.trusted.packages: "com.urunsiyabend.heimcall.common.events,com.urunsiyabend.heimcall.common.domain"
         spring.json.value.default.type: com.urunsiyabend.heimcall.common.events.AlertReceivedEvent
         spring.json.use.type.headers: false

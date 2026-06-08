@@ -4,6 +4,8 @@ import com.urunsiyabend.heimcall.common.domain.IncidentStatus;
 import com.urunsiyabend.heimcall.common.events.AlertReceivedEvent;
 import com.urunsiyabend.heimcall.incident.domain.Incident;
 import com.urunsiyabend.heimcall.incident.domain.IncidentRepository;
+import com.urunsiyabend.heimcall.incident.domain.ProcessedEvent;
+import com.urunsiyabend.heimcall.incident.domain.ProcessedEventRepository;
 import com.urunsiyabend.heimcall.incident.domain.TimelineEvent;
 import com.urunsiyabend.heimcall.incident.domain.TimelineEventRepository;
 import org.slf4j.Logger;
@@ -28,14 +30,25 @@ public class IncidentService {
 
     private final IncidentRepository incidents;
     private final TimelineEventRepository timeline;
+    private final ProcessedEventRepository processedEvents;
 
-    public IncidentService(IncidentRepository incidents, TimelineEventRepository timeline) {
+    public IncidentService(IncidentRepository incidents, TimelineEventRepository timeline,
+                           ProcessedEventRepository processedEvents) {
         this.incidents = incidents;
         this.timeline = timeline;
+        this.processedEvents = processedEvents;
     }
 
     @Transactional
     public void handle(AlertReceivedEvent event) {
+        // Idempotency: a Kafka redelivery of an already-handled event must be a no-op.
+        // The ledger row is written in this same transaction, so it commits atomically
+        // with the incident change and is absent if processing rolled back.
+        if (event.eventId() != null && processedEvents.existsById(event.eventId())) {
+            log.debug("Skipping already-processed event {}", event.eventId());
+            return;
+        }
+
         Instant at = event.occurredAt() != null ? event.occurredAt() : Instant.now();
         Optional<Incident> open = incidents.findFirstByOrganizationIdAndDedupKeyAndStatusIn(
                 event.organizationId(), event.dedupKey(), OPEN_STATUSES);
@@ -45,6 +58,10 @@ public class IncidentService {
             case RECOVERY -> open.ifPresent(incident -> resolve(incident, at));
             case ACKNOWLEDGEMENT -> open.ifPresent(incident -> acknowledge(incident, at));
             case INFO -> log.debug("INFO event ignored, dedupKey={}", event.dedupKey());
+        }
+
+        if (event.eventId() != null) {
+            processedEvents.save(new ProcessedEvent(event.eventId(), Instant.now()));
         }
     }
 
