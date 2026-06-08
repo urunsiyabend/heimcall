@@ -553,6 +553,15 @@ Acceptance focus:
 - A service must belong to one organization.
 - A service can be owned by a team (team referenced from identity-service).
 
+Deferred from Phase 1b (built & verified 2026-06-09; carry forward):
+
+- Single owning team (`owner_team_id` column); a multi-team ownership table is deferred.
+- escalation_policy assignment is a placeholder (id stored, not validated until escalation-service).
+- Cross-service tenant checks (membership, team-in-org) go through identity's internal API with no
+  caching; Redis caching deferred along with the resolution cache in Phase 1a.
+- MonitoredService is not yet wired to incident routing (routing-key -> service mapping is later).
+- Automated tests — verification was manual curl only.
+
 ## Phase 2 - Integration Ingestion and Alert Normalization
 
 Goal: accept external signals.

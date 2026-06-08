@@ -2,7 +2,7 @@
 
 Living document. Update at the end of every sprint. Reflects what is actually built and running, not what is planned. Plan lives in `01-development-plan.md`; this file is the source of truth for "where are we now".
 
-Last updated: 2026-06-08 (end of Sprint 3)
+Last updated: 2026-06-09 (end of Sprint 4)
 
 ## 1. Snapshot
 
@@ -10,8 +10,8 @@ Last updated: 2026-06-08 (end of Sprint 3)
 | --- | --- |
 | Architecture | Microservices-first monorepo, Gradle multi-project |
 | Build | `./gradlew build` green on Java 21 |
-| Runtime verified | Sprint 3 identity slice (org/user/team/membership + integration-key issue/resolve, real tenant on ingest) |
-| Last sprint | Sprint 3 - Phase 1a identity-service |
+| Runtime verified | Sprint 4 service-catalog slice (monitored services, team ownership w/ cross-service tenant check, tags); gateway routing exercised |
+| Last sprint | Sprint 4 - Phase 1b service-catalog-service |
 
 ## 2. Locked decisions
 
@@ -30,19 +30,20 @@ libs/
   common-events      AlertReceivedEvent record, Topics constants
   test-support       Testcontainers singletons (PG + Kafka) - not yet used
 services/
-  api-gateway        Spring Cloud Gateway, routes -> identity 8083, integration 8081, incident 8082
-  identity-service   org/user/team/membership CRUD + integration-key issue/resolve (port 8083)
+  api-gateway        Spring Cloud Gateway, routes -> catalog 8084, identity 8083, integration 8081, incident 8082
+  identity-service   org/user/team/membership CRUD + integration-key issue/resolve + internal lookups (port 8083)
+  service-catalog-service  monitored services CRUD + team ownership + tags + escalation-policy placeholder (port 8084)
   integration-service  webhook ingestion -> resolves key via identity -> stores raw -> publishes alert.received.v1 (acks=all)
   incident-service   consumes alert.received.v1 -> idempotency guard -> dedup -> incident + timeline -> REST; DLT on failure
 deploy/
-  docker-compose     postgres(5433, dbs: incident + integration + identity), kafka(9092 KRaft), redis(6379), mailhog(1025/8025)
+  docker-compose     postgres(5433, dbs: incident + integration + identity + catalog), kafka(9092 KRaft), redis(6379), mailhog(1025/8025)
 ```
 
-Databases (one per service, single PG instance): `incident`, `integration`, `identity`. The
-`integration` + `identity` db/role are created by `deploy/docker-compose/initdb/01-create-databases.sql`
+Databases (one per service, single PG instance): `incident`, `integration`, `identity`, `catalog`. The
+`integration` + `identity` + `catalog` db/role are created by `deploy/docker-compose/initdb/01-create-databases.sql`
 on a fresh data volume; on an existing volume create them manually (see section 7).
 
-Ports: api-gateway 8080, integration 8081, incident 8082, identity 8083.
+Ports: api-gateway 8080, integration 8081, incident 8082, identity 8083, service-catalog 8084.
 
 ## 4. Implemented behavior
 
@@ -59,6 +60,17 @@ Ports: api-gateway 8080, integration 8081, incident 8082, identity 8083.
   returned **once**; only a SHA-256 hash + prefix stored. `integrationId` is the stable id stamped on events.
 - Resolve (internal): `POST /v1/integration-keys/resolve {key}` -> `{organizationId, integrationId, name}`,
   401 if unknown/inactive
+- Internal lookups (service-to-service, not on the gateway): `GET /v1/internal/organizations/{orgId}/members/{userId}`
+  (204/404), `GET /v1/internal/organizations/{orgId}/teams/{teamId}` (team-in-org check). Used by service-catalog.
+
+### service-catalog-service (port 8084)
+- Tenant rules it cannot check locally (membership, team-in-org) are enforced via identity's internal
+  API (`IdentityClient`): non-member -> 403, foreign-org team -> 409, identity unreachable -> 503.
+- Persistence (Flyway V1): `monitored_service`, `service_tag`
+- Services: `POST/GET/PUT/DELETE /v1/organizations/{orgId}/services` - slug unique per org
+- Ownership: `PUT .../services/{id}/owner {teamId}` - team verified to belong to the org (single owning team)
+- Escalation policy: `PUT .../services/{id}/escalation-policy {escalationPolicyId}` - **placeholder**, id stored, not validated
+- Tags: `PUT/GET/DELETE .../services/{id}/tags` - key/value, unique per (service, key)
 
 ### integration-service (port 8081)
 - `POST /v1/integrations/{integrationKey}/events/{routingKey}` -> 202 accepted + eventId
@@ -91,16 +103,17 @@ Ports: api-gateway 8080, integration 8081, incident 8082, identity 8083.
 - `alert.received.v1` (produced by integration-service, consumed by incident-service)
 - `alert.received.v1.DLT` (dead-letter, produced by incident-service on retry exhaustion / poison-pill)
 
-## 5. Verified end-to-end (Sprint 3)
+## 5. Verified end-to-end (Sprint 4)
 
-- create org -> user -> bootstrap membership -> issue integration key (plaintext shown once)
-- ingest with the **valid** key -> 202, incident carries the **real** organization id (not the placeholder)
-- ingest with an **invalid** key -> 401 (nothing stored/published)
-- `resolve` returns the org + integration id for a valid key
-- tenant isolation: member lists/creates teams (200/201), non-member -> 403, missing `X-User-Id` -> 400
+- member creates a monitored service (201, scoped to org); non-member -> 403; duplicate slug -> 409
+- assign a same-org team as owner -> 200; assign a **foreign-org** team -> 409 (cross-service tenant check)
+- assign escalation-policy placeholder -> 200 (id stored, unvalidated)
+- tags upsert/list/delete -> 200/200/204
+- **api-gateway** routing exercised: `/v1/organizations/{org}/services` -> catalog, `/v1/organizations/{org}/teams`
+  -> identity (specific route precedes the general one)
 
-(Sprint 2 still holds: idempotent redelivery, poison-pill -> DLT, broker-outage -> 503 + raw FAILED.
-Sprint 1: dedup alertCount, RECOVERY -> RESOLVED, timeline events.)
+(Sprint 3 still holds: integration-key issue/resolve, real tenant on ingest, invalid key -> 401.
+Sprint 2: idempotent redelivery, poison-pill -> DLT, broker-outage -> 503 + raw FAILED. Sprint 1: dedup, recovery, timeline.)
 
 ## 6. Known gaps / deliberately deferred
 
@@ -108,16 +121,16 @@ Sprint 1: dedup alertCount, RECOVERY -> RESOLVED, timeline events.)
 | --- | --- |
 | `ApiKey` (user/programmatic key) - only `IntegrationKey` built | Phase 1a deferred list |
 | Real JWT + Spring Security (still header-context stub) | later phase |
-| Redis cache for integration-key resolution (sync REST per ingest) | later |
+| Redis cache for integration-key resolution + cross-service tenant checks (sync REST each call) | later |
 | RBAC beyond membership (role stored, not enforced per-action) | later |
 | Integration-key revoke/rotate endpoints (revoke on entity, not exposed) | later |
-| MonitoredService / service catalog | Phase 1b (next) |
+| Single owning team only; multi-team ownership table | later |
+| MonitoredService not wired to incident routing (routing-key -> service) | later (Phase 5 area) |
 | Separate Alert table (count lives on incident) | Phase 3 |
 | `processed_event` ledger has no TTL/pruning (grows unbounded) | later |
 | Transactional outbox; FAILED raw events have no auto-republisher | later |
 | Notifications, escalation, schedules | Phases 4-6 |
 | Tests (unit / integration / contract) | ongoing, none yet |
-| api-gateway not exercised at runtime (routes configured) | next |
 
 ## 7. How to run locally
 
@@ -125,17 +138,20 @@ Sprint 1: dedup alertCount, RECOVERY -> RESOLVED, timeline events.)
 # 1. infra
 docker compose -f deploy/docker-compose/docker-compose.yml up -d
 
-# 1b. on an EXISTING data volume the integration/identity dbs are not auto-created; create once:
+# 1b. on an EXISTING data volume the extra dbs are not auto-created; create once:
 docker exec heimcall-local-postgres-1 psql -U incident \
   -c "CREATE ROLE integration WITH LOGIN PASSWORD 'integration';" \
   -c "CREATE DATABASE integration OWNER integration;" \
   -c "CREATE ROLE identity WITH LOGIN PASSWORD 'identity';" \
-  -c "CREATE DATABASE identity OWNER identity;"
+  -c "CREATE DATABASE identity OWNER identity;" \
+  -c "CREATE ROLE catalog WITH LOGIN PASSWORD 'catalog';" \
+  -c "CREATE DATABASE catalog OWNER catalog;"
 # (or wipe and let initdb run: docker compose ... down -v && up -d)
 
 # 2. services (separate shells), JAVA_HOME must point at JDK 21
 export JAVA_HOME=/usr/lib/jvm/java-21-openjdk
 ./gradlew :services:identity-service:bootRun
+./gradlew :services:service-catalog-service:bootRun
 ./gradlew :services:incident-service:bootRun
 ./gradlew :services:integration-service:bootRun
 
@@ -158,5 +174,6 @@ curl localhost:8082/v1/incidents
 
 ## 8. Next sprint
 
-Recommended: **Phase 1b - service-catalog-service** (MonitoredService CRUD, service ownership by team,
-tags, escalation-policy placeholder). Sits on identity (teams). See plan Phase 1b.
+Phase 1 (identity + service catalog) is complete. Candidates: **Phase 4 - Scheduling** (on-call
+calculation, prerequisite for escalation) or **Phase 3** finish (separate Alert table + lifecycle
+REST commands ack/resolve/cancel). Decide at sprint start.

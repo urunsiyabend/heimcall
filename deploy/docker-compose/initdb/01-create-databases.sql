@@ -8,3 +8,6 @@ CREATE DATABASE integration OWNER integration;
 
 CREATE ROLE identity WITH LOGIN PASSWORD 'identity';
 CREATE DATABASE identity OWNER identity;
+
+CREATE ROLE catalog WITH LOGIN PASSWORD 'catalog';
+CREATE DATABASE catalog OWNER catalog;
