@@ -2,7 +2,7 @@
 
 Living document. Update at the end of every sprint. Reflects what is actually built and running, not what is planned. Plan lives in `01-development-plan.md`; this file is the source of truth for "where are we now".
 
-Last updated: 2026-06-09 (end of Sprint 4)
+Last updated: 2026-06-09 (end of Sprint 5)
 
 ## 1. Snapshot
 
@@ -10,8 +10,9 @@ Last updated: 2026-06-09 (end of Sprint 4)
 | --- | --- |
 | Architecture | Microservices-first monorepo, Gradle multi-project |
 | Build | `./gradlew build` green on Java 21 |
-| Runtime verified | Sprint 4 service-catalog slice (monitored services, team ownership w/ cross-service tenant check, tags); gateway routing exercised |
-| Last sprint | Sprint 4 - Phase 1b service-catalog-service |
+| Runtime verified | Sprint 5 scheduling slice (schedules, daily/weekly rotations, overrides, timezone-aware on-call) |
+| Last sprint | Sprint 5 - Phase 4 schedule-service |
+| Tests | First automated test: `OnCallCalculatorTest` (rotation math) |
 
 ## 2. Locked decisions
 
@@ -30,20 +31,21 @@ libs/
   common-events      AlertReceivedEvent record, Topics constants
   test-support       Testcontainers singletons (PG + Kafka) - not yet used
 services/
-  api-gateway        Spring Cloud Gateway, routes -> catalog 8084, identity 8083, integration 8081, incident 8082
+  api-gateway        Spring Cloud Gateway, routes -> catalog 8084, schedule 8085, identity 8083, integration 8081, incident 8082
   identity-service   org/user/team/membership CRUD + integration-key issue/resolve + internal lookups (port 8083)
   service-catalog-service  monitored services CRUD + team ownership + tags + escalation-policy placeholder (port 8084)
+  schedule-service   on-call schedules, daily/weekly rotations, overrides, timezone-aware on-call resolution (port 8085)
   integration-service  webhook ingestion -> resolves key via identity -> stores raw -> publishes alert.received.v1 (acks=all)
   incident-service   consumes alert.received.v1 -> idempotency guard -> dedup -> incident + timeline -> REST; DLT on failure
 deploy/
-  docker-compose     postgres(5433, dbs: incident + integration + identity + catalog), kafka(9092 KRaft), redis(6379), mailhog(1025/8025)
+  docker-compose     postgres(5433, dbs: incident + integration + identity + catalog + schedule), kafka(9092 KRaft), redis(6379), mailhog(1025/8025)
 ```
 
-Databases (one per service, single PG instance): `incident`, `integration`, `identity`, `catalog`. The
-`integration` + `identity` + `catalog` db/role are created by `deploy/docker-compose/initdb/01-create-databases.sql`
-on a fresh data volume; on an existing volume create them manually (see section 7).
+Databases (one per service, single PG instance): `incident`, `integration`, `identity`, `catalog`, `schedule`.
+The non-default db/role are created by `deploy/docker-compose/initdb/01-create-databases.sql` on a fresh data
+volume; on an existing volume create them manually (see section 7).
 
-Ports: api-gateway 8080, integration 8081, incident 8082, identity 8083, service-catalog 8084.
+Ports: api-gateway 8080, integration 8081, incident 8082, identity 8083, service-catalog 8084, schedule 8085.
 
 ## 4. Implemented behavior
 
@@ -71,6 +73,18 @@ Ports: api-gateway 8080, integration 8081, incident 8082, identity 8083, service
 - Ownership: `PUT .../services/{id}/owner {teamId}` - team verified to belong to the org (single owning team)
 - Escalation policy: `PUT .../services/{id}/escalation-policy {escalationPolicyId}` - **placeholder**, id stored, not validated
 - Tags: `PUT/GET/DELETE .../services/{id}/tags` - key/value, unique per (service, key)
+
+### schedule-service (port 8085)
+- Tenant rules enforced via identity internal API (`IdentityClient`): caller membership (403) and that
+  participant/override users belong to the org (409); identity unreachable -> 503.
+- Persistence (Flyway V1): `on_call_schedule` (timezone), `schedule_rotation`, `rotation_participant`, `schedule_override`
+- Schedules: `POST/GET/PUT/DELETE /v1/organizations/{orgId}/schedules` - invalid timezone -> 400
+- Rotations: `POST/GET/DELETE .../schedules/{id}/rotations` (DAILY/WEEKLY, start_date + handoff_time, priority)
+  and `.../rotations/{id}/participants` (ordered, position unique)
+- Overrides: `POST/GET/DELETE .../schedules/{id}/overrides` (user, [startAt, endAt))
+- On-call: `GET .../schedules/{id}/on-call[?at=ISO8601]` -> `{userId, source: OVERRIDE|ROTATION, rotationId}`
+  - Rotation is calendar-based in the schedule's zone (DAILY/WEEKLY, DST-aware via ChronoUnit on ZonedDateTime).
+    Resolution: active override wins, else highest-priority started rotation. Pure math in `OnCallCalculator`.
 
 ### integration-service (port 8081)
 - `POST /v1/integrations/{integrationKey}/events/{routingKey}` -> 202 accepted + eventId
@@ -103,17 +117,16 @@ Ports: api-gateway 8080, integration 8081, incident 8082, identity 8083, service
 - `alert.received.v1` (produced by integration-service, consumed by incident-service)
 - `alert.received.v1.DLT` (dead-letter, produced by incident-service on retry exhaustion / poison-pill)
 
-## 5. Verified end-to-end (Sprint 4)
+## 5. Verified end-to-end (Sprint 5)
 
-- member creates a monitored service (201, scoped to org); non-member -> 403; duplicate slug -> 409
-- assign a same-org team as owner -> 200; assign a **foreign-org** team -> 409 (cross-service tenant check)
-- assign escalation-policy placeholder -> 200 (id stored, unvalidated)
-- tags upsert/list/delete -> 200/200/204
-- **api-gateway** routing exercised: `/v1/organizations/{org}/services` -> catalog, `/v1/organizations/{org}/teams`
-  -> identity (specific route precedes the general one)
+- weekly rotation (2 participants): week 0 -> P0, week 1 -> P1 (correct participant per period)
+- override priority: inside the override window -> override user (OVERRIDE); outside -> rotation user (ROTATION)
+- timezone respected: `OnCallCalculatorTest` shows the same instant resolves to a different period under UTC vs Asia/Tokyo
+- invalid timezone on create -> 400; non-member access -> 403; non-member participant -> 409
+- `OnCallCalculatorTest` green (daily rotate + wraparound, handoff-time boundary, weekly, not-started, tz)
 
-(Sprint 3 still holds: integration-key issue/resolve, real tenant on ingest, invalid key -> 401.
-Sprint 2: idempotent redelivery, poison-pill -> DLT, broker-outage -> 503 + raw FAILED. Sprint 1: dedup, recovery, timeline.)
+(Sprint 4 still holds: monitored services, team ownership w/ cross-service tenant check, tags, gateway routing.
+Sprint 3: key issue/resolve, real tenant on ingest. Sprint 2: idempotency, DLT, broker-outage 503. Sprint 1: dedup, recovery, timeline.)
 
 ## 6. Known gaps / deliberately deferred
 
@@ -126,11 +139,14 @@ Sprint 2: idempotent redelivery, poison-pill -> DLT, broker-outage -> 503 + raw 
 | Integration-key revoke/rotate endpoints (revoke on entity, not exposed) | later |
 | Single owning team only; multi-team ownership table | later |
 | MonitoredService not wired to incident routing (routing-key -> service) | later (Phase 5 area) |
+| Rotation length DAILY/WEEKLY only; custom N-day rotations | later |
+| DST transition-instant edge not tested; on-call has no Redis cache | later |
+| Schedule not yet consumed by escalation (no escalation engine yet) | Phase 5 |
 | Separate Alert table (count lives on incident) | Phase 3 |
 | `processed_event` ledger has no TTL/pruning (grows unbounded) | later |
 | Transactional outbox; FAILED raw events have no auto-republisher | later |
-| Notifications, escalation, schedules | Phases 4-6 |
-| Tests (unit / integration / contract) | ongoing, none yet |
+| Notifications, escalation | Phases 5-6 |
+| Tests: only `OnCallCalculatorTest` so far; no integration/contract tests | ongoing |
 
 ## 7. How to run locally
 
@@ -145,13 +161,16 @@ docker exec heimcall-local-postgres-1 psql -U incident \
   -c "CREATE ROLE identity WITH LOGIN PASSWORD 'identity';" \
   -c "CREATE DATABASE identity OWNER identity;" \
   -c "CREATE ROLE catalog WITH LOGIN PASSWORD 'catalog';" \
-  -c "CREATE DATABASE catalog OWNER catalog;"
+  -c "CREATE DATABASE catalog OWNER catalog;" \
+  -c "CREATE ROLE schedule WITH LOGIN PASSWORD 'schedule';" \
+  -c "CREATE DATABASE schedule OWNER schedule;"
 # (or wipe and let initdb run: docker compose ... down -v && up -d)
 
 # 2. services (separate shells), JAVA_HOME must point at JDK 21
 export JAVA_HOME=/usr/lib/jvm/java-21-openjdk
 ./gradlew :services:identity-service:bootRun
 ./gradlew :services:service-catalog-service:bootRun
+./gradlew :services:schedule-service:bootRun
 ./gradlew :services:incident-service:bootRun
 ./gradlew :services:integration-service:bootRun
 
@@ -174,6 +193,7 @@ curl localhost:8082/v1/incidents
 
 ## 8. Next sprint
 
-Phase 1 (identity + service catalog) is complete. Candidates: **Phase 4 - Scheduling** (on-call
-calculation, prerequisite for escalation) or **Phase 3** finish (separate Alert table + lifecycle
-REST commands ack/resolve/cancel). Decide at sprint start.
+Phases 1 + 4 complete. Recommended: **Phase 5 - Escalation Engine** (escalation policies/rules,
+Kafka-driven incident.triggered handling, notify-in-order with schedule lookups, cancel on ACK/RESOLVE).
+It ties together incident-service, schedule-service, and the (future) notification-service. Alternative:
+finish **Phase 3** (separate Alert table + lifecycle REST commands). Decide at sprint start.

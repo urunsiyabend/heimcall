@@ -7,11 +7,15 @@ spring:
   cloud:
     gateway:
       routes:
-        # More specific service-catalog route must precede identity's /v1/organizations/** route.
+        # More specific catalog/schedule routes must precede identity's /v1/organizations/** route.
         - id: service-catalog-service
           uri: http://localhost:8084
           predicates:
             - Path=/v1/organizations/*/services/**
+        - id: schedule-service
+          uri: http://localhost:8085
+          predicates:
+            - Path=/v1/organizations/*/schedules/**
         - id: identity-service
           uri: http://localhost:8083
           predicates:

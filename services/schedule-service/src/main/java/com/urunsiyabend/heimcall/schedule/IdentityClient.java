@@ -1,0 +1,51 @@
+package com.urunsiyabend.heimcall.schedule;
+
+import com.urunsiyabend.heimcall.schedule.web.ApiExceptions;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.http.HttpStatusCode;
+import org.springframework.stereotype.Component;
+import org.springframework.web.client.ResourceAccessException;
+import org.springframework.web.client.RestClient;
+
+import java.util.UUID;
+
+/**
+ * Enforces tenant rules owned by identity-service: org membership of the caller and of users added
+ * as rotation participants / override targets. Checked over the internal identity API.
+ */
+@Component
+public class IdentityClient {
+
+    private final RestClient restClient;
+
+    public IdentityClient(@Value("${identity.base-url:http://localhost:8083}") String baseUrl) {
+        this.restClient = RestClient.builder().baseUrl(baseUrl).build();
+    }
+
+    /** 403 if the caller is not a member of the org. */
+    public void requireMember(UUID organizationId, UUID userId) {
+        check(organizationId, userId, new ApiExceptions.ForbiddenException("user is not a member of this organization"));
+    }
+
+    /** 409 if a user being added to the schedule is not a member of the org. */
+    public void requireOrgUser(UUID organizationId, UUID userId) {
+        check(organizationId, userId, new ApiExceptions.ConflictException("user is not a member of this organization"));
+    }
+
+    private void check(UUID organizationId, UUID userId, RuntimeException on4xx) {
+        try {
+            restClient.get()
+                    .uri("/v1/internal/organizations/{org}/members/{user}", organizationId, userId)
+                    .retrieve()
+                    .onStatus(HttpStatusCode::is4xxClientError, (req, res) -> {
+                        throw on4xx;
+                    })
+                    .onStatus(HttpStatusCode::is5xxServerError, (req, res) -> {
+                        throw new ApiExceptions.DependencyUnavailableException("identity-service error");
+                    })
+                    .toBodilessEntity();
+        } catch (ResourceAccessException e) {
+            throw new ApiExceptions.DependencyUnavailableException("identity-service unreachable");
+        }
+    }
+}

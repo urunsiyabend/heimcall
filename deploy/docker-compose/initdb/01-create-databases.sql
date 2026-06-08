@@ -11,3 +11,6 @@ CREATE DATABASE identity OWNER identity;
 
 CREATE ROLE catalog WITH LOGIN PASSWORD 'catalog';
 CREATE DATABASE catalog OWNER catalog;
+
+CREATE ROLE schedule WITH LOGIN PASSWORD 'schedule';
+CREATE DATABASE schedule OWNER schedule;

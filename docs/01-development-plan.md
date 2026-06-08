@@ -656,6 +656,18 @@ Acceptance focus:
 - Override takes priority over base rotation.
 - Timezone is respected.
 
+Built as `schedule-service` (port 8085). Rotation is calendar-based: anchored at start_date +
+handoff_time in the schedule's timezone; DAILY/WEEKLY periods counted with ChronoUnit on
+ZonedDateTime (DST-aware). On-call resolution: active override wins, else highest-priority started
+rotation. Pure math in `OnCallCalculator` with a JUnit test (first automated test in the repo).
+
+Deferred from Phase 4 (built & verified 2026-06-09; carry forward):
+
+- Rotation length is DAILY or WEEKLY only; custom N-day/length rotations deferred.
+- DST transition-instant edge behavior not tested (Istanbul, which has no DST, was used for tests).
+- On-call cache (Redis) not added; each query recomputes from the DB.
+- Participant/override user membership is checked via identity's internal API per call (no cache).
+
 ## Phase 5 - Escalation Engine
 
 Goal: notify the right people in order.

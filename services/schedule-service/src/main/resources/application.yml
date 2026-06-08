@@ -1,0 +1,25 @@
+server:
+  port: 8085
+
+spring:
+  application:
+    name: schedule-service
+  datasource:
+    url: ${DB_URL:jdbc:postgresql://localhost:5433/schedule}
+    username: ${DB_USERNAME:schedule}
+    password: ${DB_PASSWORD:schedule}
+  jpa:
+    hibernate:
+      ddl-auto: validate
+    open-in-view: false
+  flyway:
+    enabled: true
+
+identity:
+  base-url: ${IDENTITY_BASE_URL:http://localhost:8083}
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info
