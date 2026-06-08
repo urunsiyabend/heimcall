@@ -2,6 +2,8 @@ package com.urunsiyabend.heimcall.integration.web;
 
 import com.urunsiyabend.heimcall.integration.AlertNormalizer;
 import com.urunsiyabend.heimcall.integration.EventPublishException;
+import com.urunsiyabend.heimcall.integration.InvalidIntegrationKeyException;
+import com.urunsiyabend.heimcall.integration.KeyResolutionUnavailableException;
 import jakarta.validation.Valid;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
@@ -48,5 +50,19 @@ public class IngestionController {
     @ResponseStatus(HttpStatus.SERVICE_UNAVAILABLE)
     public Map<String, String> onPublishFailure(EventPublishException e) {
         return Map.of("status", "rejected", "reason", "event not published, retry");
+    }
+
+    /** Unknown / inactive integration key. */
+    @ExceptionHandler(InvalidIntegrationKeyException.class)
+    @ResponseStatus(HttpStatus.UNAUTHORIZED)
+    public Map<String, String> onInvalidKey(InvalidIntegrationKeyException e) {
+        return Map.of("status", "rejected", "reason", "invalid integration key");
+    }
+
+    /** Key could not be validated because identity-service is unreachable. */
+    @ExceptionHandler(KeyResolutionUnavailableException.class)
+    @ResponseStatus(HttpStatus.SERVICE_UNAVAILABLE)
+    public Map<String, String> onResolutionUnavailable(KeyResolutionUnavailableException e) {
+        return Map.of("status", "rejected", "reason", "cannot validate integration key, retry");
     }
 }

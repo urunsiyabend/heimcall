@@ -2,7 +2,7 @@
 
 Living document. Update at the end of every sprint. Reflects what is actually built and running, not what is planned. Plan lives in `01-development-plan.md`; this file is the source of truth for "where are we now".
 
-Last updated: 2026-06-05 (end of Sprint 2)
+Last updated: 2026-06-08 (end of Sprint 3)
 
 ## 1. Snapshot
 
@@ -10,8 +10,8 @@ Last updated: 2026-06-05 (end of Sprint 2)
 | --- | --- |
 | Architecture | Microservices-first monorepo, Gradle multi-project |
 | Build | `./gradlew build` green on Java 21 |
-| Runtime verified | Sprint 2 reliability slice (raw store + acks=all, idempotent consumer, DLT, poison-pill) |
-| Last sprint | Sprint 2 - Phase 3.5 reliability and idempotency |
+| Runtime verified | Sprint 3 identity slice (org/user/team/membership + integration-key issue/resolve, real tenant on ingest) |
+| Last sprint | Sprint 3 - Phase 1a identity-service |
 
 ## 2. Locked decisions
 
@@ -30,23 +30,43 @@ libs/
   common-events      AlertReceivedEvent record, Topics constants
   test-support       Testcontainers singletons (PG + Kafka) - not yet used
 services/
-  api-gateway        Spring Cloud Gateway, routes /v1/integrations -> 8081, /v1/incidents -> 8082
-  integration-service  webhook ingestion -> stores raw -> publishes alert.received.v1 (acks=all, confirmed)
+  api-gateway        Spring Cloud Gateway, routes -> identity 8083, integration 8081, incident 8082
+  identity-service   org/user/team/membership CRUD + integration-key issue/resolve (port 8083)
+  integration-service  webhook ingestion -> resolves key via identity -> stores raw -> publishes alert.received.v1 (acks=all)
   incident-service   consumes alert.received.v1 -> idempotency guard -> dedup -> incident + timeline -> REST; DLT on failure
 deploy/
-  docker-compose     postgres(5433, dbs: incident + integration), kafka(9092 KRaft), redis(6379), mailhog(1025/8025)
+  docker-compose     postgres(5433, dbs: incident + integration + identity), kafka(9092 KRaft), redis(6379), mailhog(1025/8025)
 ```
 
-Databases (one per service, single PG instance): `incident`, `integration`. The `integration`
-db + role are created by `deploy/docker-compose/initdb/01-create-databases.sql` on a fresh data
-volume; on an existing volume create them manually (see section 7).
+Databases (one per service, single PG instance): `incident`, `integration`, `identity`. The
+`integration` + `identity` db/role are created by `deploy/docker-compose/initdb/01-create-databases.sql`
+on a fresh data volume; on an existing volume create them manually (see section 7).
+
+Ports: api-gateway 8080, integration 8081, incident 8082, identity 8083.
 
 ## 4. Implemented behavior
 
+### identity-service (port 8083)
+- Tenant isolation is a **header-context stub**: org-scoped endpoints take `X-User-Id`; `TenantGuard`
+  requires an existing membership in the path `orgId`, else 403 (missing header -> 400). JWT deferred.
+- Persistence (Flyway V1): `organization`, `app_user`, `membership` (org role), `team`, `team_member`,
+  `integration_key`
+- Org/User: `POST/GET /v1/organizations`, `POST/GET /v1/users`
+- Membership: `POST/GET /v1/organizations/{orgId}/memberships` - the **first** membership of an org is a
+  bootstrap (no caller header needed); every later add must come from an existing member
+- Teams: `POST/GET /v1/organizations/{orgId}/teams` and `.../teams/{teamId}/members`
+- Integration keys: `POST/GET /v1/organizations/{orgId}/integration-keys` - plaintext (`hc_` + random)
+  returned **once**; only a SHA-256 hash + prefix stored. `integrationId` is the stable id stamped on events.
+- Resolve (internal): `POST /v1/integration-keys/resolve {key}` -> `{organizationId, integrationId, name}`,
+  401 if unknown/inactive
+
 ### integration-service (port 8081)
 - `POST /v1/integrations/{integrationKey}/events/{routingKey}` -> 202 accepted + eventId
+- Resolves the integration key via identity-service (`IdentityClient`, sync REST). Invalid key -> **401**;
+  identity unreachable -> **503** (cannot validate, so nothing is published). Dev placeholder org is gone.
 - Validates payload (`messageType`, `entityId`, `source` required)
-- Normalizes to `AlertReceivedEvent`, `dedupKey = source + ":" + entityId`
+- Normalizes to `AlertReceivedEvent` with the resolved `organizationId` + `integrationId`,
+  `dedupKey = source + ":" + entityId`
 - Stores the raw payload (`raw_inbound_event`, Flyway V1) before publishing - audit + replay trace
 - Publishes to Kafka topic `alert.received.v1` (key = dedupKey) with `acks=all` + idempotent producer,
   confirmed synchronously (10s timeout). On a confirmed write the raw row is marked `PUBLISHED`.
@@ -71,28 +91,33 @@ volume; on an existing volume create them manually (see section 7).
 - `alert.received.v1` (produced by integration-service, consumed by incident-service)
 - `alert.received.v1.DLT` (dead-letter, produced by incident-service on retry exhaustion / poison-pill)
 
-## 5. Verified end-to-end (Sprint 2)
+## 5. Verified end-to-end (Sprint 3)
 
-- normal CRITICAL -> incident TRIGGERED, raw_inbound_event `PUBLISHED`
-- same `eventId` delivered twice -> alertCount stays 1, one `processed_event` row (idempotent, no inflation)
-- malformed payload -> lands in `alert.received.v1.DLT`, consumer keeps processing the next valid event
-- Kafka stopped during ingest -> HTTP 503, raw_inbound_event `FAILED` (no silent loss)
+- create org -> user -> bootstrap membership -> issue integration key (plaintext shown once)
+- ingest with the **valid** key -> 202, incident carries the **real** organization id (not the placeholder)
+- ingest with an **invalid** key -> 401 (nothing stored/published)
+- `resolve` returns the org + integration id for a valid key
+- tenant isolation: member lists/creates teams (200/201), non-member -> 403, missing `X-User-Id` -> 400
 
-(Sprint 1 still holds: 2x CRITICAL same dedupKey -> alertCount=2; RECOVERY -> RESOLVED; timeline TRIGGER/DUPLICATE/RESOLVE.)
+(Sprint 2 still holds: idempotent redelivery, poison-pill -> DLT, broker-outage -> 503 + raw FAILED.
+Sprint 1: dedup alertCount, RECOVERY -> RESOLVED, timeline events.)
 
 ## 6. Known gaps / deliberately deferred
 
 | Gap | Where it is addressed |
 | --- | --- |
-| Real integration-key validation (org is a fixed dev placeholder) | Phase 1 (identity) |
+| `ApiKey` (user/programmatic key) - only `IntegrationKey` built | Phase 1a deferred list |
+| Real JWT + Spring Security (still header-context stub) | later phase |
+| Redis cache for integration-key resolution (sync REST per ingest) | later |
+| RBAC beyond membership (role stored, not enforced per-action) | later |
+| Integration-key revoke/rotate endpoints (revoke on entity, not exposed) | later |
+| MonitoredService / service catalog | Phase 1b (next) |
 | Separate Alert table (count lives on incident) | Phase 3 |
-| Idempotency-Key on inbound HTTP ingest (event-id idempotency on consumer done) | later |
-| `processed_event` ledger has no TTL/pruning (grows unbounded) | later (Redis key w/ TTL option in plan) |
-| Transactional outbox (raw store + sync confirm used instead) | optional, deferred |
-| FAILED raw events have no automatic republisher (manual replay only) | later |
+| `processed_event` ledger has no TTL/pruning (grows unbounded) | later |
+| Transactional outbox; FAILED raw events have no auto-republisher | later |
 | Notifications, escalation, schedules | Phases 4-6 |
 | Tests (unit / integration / contract) | ongoing, none yet |
-| api-gateway not exercised (hit services directly) | next |
+| api-gateway not exercised at runtime (routes configured) | next |
 
 ## 7. How to run locally
 
@@ -100,19 +125,31 @@ volume; on an existing volume create them manually (see section 7).
 # 1. infra
 docker compose -f deploy/docker-compose/docker-compose.yml up -d
 
-# 1b. on an EXISTING data volume the integration db/role are not auto-created; create once:
+# 1b. on an EXISTING data volume the integration/identity dbs are not auto-created; create once:
 docker exec heimcall-local-postgres-1 psql -U incident \
   -c "CREATE ROLE integration WITH LOGIN PASSWORD 'integration';" \
-  -c "CREATE DATABASE integration OWNER integration;"
+  -c "CREATE DATABASE integration OWNER integration;" \
+  -c "CREATE ROLE identity WITH LOGIN PASSWORD 'identity';" \
+  -c "CREATE DATABASE identity OWNER identity;"
 # (or wipe and let initdb run: docker compose ... down -v && up -d)
 
 # 2. services (separate shells), JAVA_HOME must point at JDK 21
 export JAVA_HOME=/usr/lib/jvm/java-21-openjdk
+./gradlew :services:identity-service:bootRun
 ./gradlew :services:incident-service:bootRun
 ./gradlew :services:integration-service:bootRun
 
-# 3. fire a test alert
-curl -XPOST localhost:8081/v1/integrations/dev-key/events/backend-critical \
+# 3. bootstrap a tenant + issue a key, then ingest with it
+OID=$(curl -s -XPOST localhost:8083/v1/organizations -H 'Content-Type: application/json' \
+  -d '{"name":"Acme","slug":"acme"}' | python3 -c 'import sys,json;print(json.load(sys.stdin)["id"])')
+UID=$(curl -s -XPOST localhost:8083/v1/users -H 'Content-Type: application/json' \
+  -d '{"email":"a@acme.io","displayName":"Alice"}' | python3 -c 'import sys,json;print(json.load(sys.stdin)["id"])')
+curl -s -XPOST localhost:8083/v1/organizations/$OID/memberships -H 'Content-Type: application/json' \
+  -d "{\"userId\":\"$UID\",\"role\":\"OWNER\"}"
+KEY=$(curl -s -XPOST localhost:8083/v1/organizations/$OID/integration-keys -H "X-User-Id: $UID" \
+  -H 'Content-Type: application/json' -d '{"name":"grafana-prod"}' | python3 -c 'import sys,json;print(json.load(sys.stdin)["key"])')
+
+curl -XPOST "localhost:8081/v1/integrations/$KEY/events/backend-critical" \
   -H 'Content-Type: application/json' \
   -d '{"messageType":"CRITICAL","entityId":"payment-api-5xx","source":"grafana","severity":"CRITICAL"}'
 
@@ -121,5 +158,5 @@ curl localhost:8082/v1/incidents
 
 ## 8. Next sprint
 
-Recommended: Phase 1 - Identity, Teams, and Service Catalog (real org/integration-key resolution
-replaces the dev placeholder), or Phase 4 - Scheduling. Reliability path (Phase 3.5) is now closed.
+Recommended: **Phase 1b - service-catalog-service** (MonitoredService CRUD, service ownership by team,
+tags, escalation-policy placeholder). Sits on identity (teams). See plan Phase 1b.

@@ -499,22 +499,59 @@ Prometheus + Grafana optional
 
 Goal: model who owns what.
 
+Split into two sequential vertical slices (decided 2026-06-08) instead of one large sprint:
+`identity-service` first (it unblocks real tenant + integration-key resolution, the main Phase 1
+goal), then `service-catalog-service` (it references teams from identity, so it sits on top).
+Both are separate deployable services with their own database, per the microservices-first decision.
+
+Cross-cutting decisions for Phase 1:
+
+- Auth: header-context stub for now (`X-Org-Id` / `X-User-Id` carry the tenant context). Full JWT +
+  Spring Security is deferred to a later phase. Tenant-isolation rule still enforced via that context.
+- Integration-key resolution: integration-service resolves the key synchronously over REST against
+  identity-service at ingest time; an invalid key is rejected (401). Redis caching deferred.
+
+### Phase 1a - identity-service
+
 Deliverables:
 
 - Organization CRUD
 - User CRUD
 - Team CRUD
 - Team membership
-- MonitoredService CRUD
-- Assign service to team
-- Assign service to escalation policy placeholder
 - API key generation for integrations
+- IntegrationKey issue + resolve (hashed at rest; plaintext shown once)
+- Resolve endpoint consumed by integration-service to replace the dev placeholder org
 
 Acceptance focus:
 
-- Only organization members can access organization data.
+- Only organization members can access organization data (via header context).
+- An invalid / unknown integration key is rejected at ingestion (401).
+- A valid integration key resolves to its organization + integration id.
+
+Deferred from Phase 1a (built & verified 2026-06-08; carry forward):
+
+- `ApiKey` (user/programmatic API key, plan 4.1) — only `IntegrationKey` was implemented.
+- Real JWT + Spring Security auth — still the header-context stub.
+- Redis cache for integration-key resolution (currently a synchronous REST call per ingest).
+- RBAC beyond "is a member" (role is stored but not enforced per-action).
+- Integration-key revoke/rotate endpoints (revoke exists on the entity, not exposed).
+- Automated tests (unit / integration) — verification was manual curl only.
+- api-gateway identity route added but not exercised at runtime.
+
+### Phase 1b - service-catalog-service
+
+Deliverables:
+
+- MonitoredService CRUD
+- Assign service to team (ServiceOwnership)
+- ServiceTag
+- Assign service to escalation policy placeholder
+
+Acceptance focus:
+
 - A service must belong to one organization.
-- A service can be owned by a team.
+- A service can be owned by a team (team referenced from identity-service).
 
 ## Phase 2 - Integration Ingestion and Alert Normalization
 

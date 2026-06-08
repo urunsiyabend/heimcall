@@ -5,3 +5,6 @@
 
 CREATE ROLE integration WITH LOGIN PASSWORD 'integration';
 CREATE DATABASE integration OWNER integration;
+
+CREATE ROLE identity WITH LOGIN PASSWORD 'identity';
+CREATE DATABASE identity OWNER identity;

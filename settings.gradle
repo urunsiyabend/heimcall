@@ -10,5 +10,6 @@ include 'libs:common-events'
 include 'libs:test-support'
 
 include 'services:api-gateway'
+include 'services:identity-service'
 include 'services:integration-service'
 include 'services:incident-service'

@@ -28,32 +28,37 @@ import java.util.concurrent.TimeoutException;
  * <p>Reliability (Phase 3.5): the raw payload is persisted before publishing, the send is
  * confirmed synchronously (acks=all), and a failed publish is surfaced to the caller via
  * {@link EventPublishException} instead of being silently dropped.
+ *
+ * <p>Phase 1a: the integration key is resolved against identity-service to obtain the real
+ * organization + integration id, replacing the Sprint 1 dev placeholder. An invalid key is
+ * rejected before anything is stored or published.
  */
 @Service
 public class AlertNormalizer {
 
     private static final Logger log = LoggerFactory.getLogger(AlertNormalizer.class);
 
-    // Sprint 1 placeholder tenant. Replaced once identity-service resolves the
-    // integration key to a real organization.
-    private static final UUID DEV_ORGANIZATION_ID =
-            UUID.fromString("00000000-0000-0000-0000-000000000001");
-
     private static final Duration PUBLISH_TIMEOUT = Duration.ofSeconds(10);
 
     private final KafkaTemplate<String, Object> kafkaTemplate;
     private final RawInboundEventRepository rawEvents;
     private final ObjectMapper objectMapper;
+    private final IdentityClient identityClient;
 
     public AlertNormalizer(KafkaTemplate<String, Object> kafkaTemplate,
                            RawInboundEventRepository rawEvents,
-                           ObjectMapper objectMapper) {
+                           ObjectMapper objectMapper,
+                           IdentityClient identityClient) {
         this.kafkaTemplate = kafkaTemplate;
         this.rawEvents = rawEvents;
         this.objectMapper = objectMapper;
+        this.identityClient = identityClient;
     }
 
     public UUID normalizeAndPublish(String integrationKey, String routingKey, WebhookRequest request) {
+        // Validate + resolve the key first; an invalid key is rejected (401) before we store or publish.
+        IdentityClient.Resolution tenant = identityClient.resolve(integrationKey);
+
         UUID eventId = UUID.randomUUID();
         String dedupKey = request.source() + ":" + request.entityId();
 
@@ -65,8 +70,8 @@ public class AlertNormalizer {
         AlertReceivedEvent event = new AlertReceivedEvent(
                 eventId,
                 Instant.now(),
-                DEV_ORGANIZATION_ID,
-                deriveIntegrationId(integrationKey),
+                tenant.organizationId(),
+                tenant.integrationId(),
                 routingKey,
                 request.source(),
                 request.messageType(),
@@ -106,11 +111,5 @@ public class AlertNormalizer {
             // Should not happen for a validated record; store a marker rather than failing ingestion.
             return "{\"_serializationError\":\"" + e.getMessage() + "\"}";
         }
-    }
-
-    // Sprint 1: deterministically derive a stable id from the key so repeated calls
-    // with the same key map to the same integration id.
-    private UUID deriveIntegrationId(String integrationKey) {
-        return UUID.nameUUIDFromBytes(integrationKey.getBytes());
     }
 }
