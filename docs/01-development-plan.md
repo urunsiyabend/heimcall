@@ -710,6 +710,26 @@ Acceptance focus:
 - Failed delivery retries with bounded attempts.
 - Failed messages are visible operationally.
 
+Built as `notification-service` (port 8087). Consumes `notification.requested.v1`, persists the request
+(PK = request eventId, doubles as the idempotency ledger), fans out to the recipient's enabled
+`contact_method`s, and creates one `notification_delivery` per method. A `@Scheduled` worker fires due
+PENDING deliveries: success -> DELIVERED + `notification.delivered.v1`; failure -> bounded retry with
+backoff (attempts * retry-backoff) up to max-attempts, then FAILED + `notification.failed.v1`. Channels:
+EMAIL (`JavaMailSender` -> SMTP/mailhog) and WEBHOOK (HTTP POST, bounded timeout). Consumer is
+ErrorHandlingDeserializer + retry + DLT (mirrors Phase 3.5). Delivery state tracked separately from
+incident state. Contact methods owned here (plan 4.7), member-gated CRUD; delivery visibility endpoint.
+
+Deferred from Phase 6 (built & verified 2026-06-09; carry forward):
+
+- Telegram channel not built (EMAIL + WEBHOOK only).
+- Notification preferences are just per-contact-method `enabled`; no cooldown / per-incident throttle /
+  quiet hours, no Redis notification-cooldown cache.
+- Delivery worker assumes a single instance; no distributed lock (plan 6.4 `lock:escalation-worker`-style).
+- Contact-method `destination` is not format-validated (email/url) and has no verification step.
+- `notification.delivered/failed.v1` have no consumer yet (timeline/ops reporting is Phase 7/8).
+- Publish is at-least-once (no transactional outbox), consistent with the other services.
+- Automated tests - verification was manual (curl + console-producer + mailhog) only.
+
 ## Phase 7 - UI and Realtime Collaboration
 
 Goal: make the product usable.

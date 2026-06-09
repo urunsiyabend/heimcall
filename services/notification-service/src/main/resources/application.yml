@@ -1,0 +1,59 @@
+server:
+  port: 8087
+
+spring:
+  application:
+    name: notification-service
+  datasource:
+    url: ${DB_URL:jdbc:postgresql://localhost:5433/notification}
+    username: ${DB_USERNAME:notification}
+    password: ${DB_PASSWORD:notification}
+  jpa:
+    hibernate:
+      ddl-auto: validate
+    open-in-view: false
+  flyway:
+    enabled: true
+  mail:
+    host: ${MAIL_HOST:localhost}
+    port: ${MAIL_PORT:1025}
+    # mailhog needs no auth; keep STARTTLS/auth off for the local dev SMTP sink.
+    properties:
+      mail.smtp.auth: false
+      mail.smtp.starttls.enable: false
+  kafka:
+    bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
+    consumer:
+      group-id: notification-service.notification-requested-consumer
+      auto-offset-reset: earliest
+      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      # ErrorHandlingDeserializer wraps JSON so a poison-pill is routed to the DLT instead of
+      # blocking the partition. The concrete event type comes from the producer's type header.
+      value-deserializer: org.springframework.kafka.support.serializer.ErrorHandlingDeserializer
+      properties:
+        spring.deserializer.value.delegate.class: org.springframework.kafka.support.serializer.JsonDeserializer
+        spring.json.trusted.packages: "com.urunsiyabend.heimcall.common.events,com.urunsiyabend.heimcall.common.domain"
+        spring.json.use.type.headers: true
+
+identity:
+  base-url: ${IDENTITY_BASE_URL:http://localhost:8083}
+
+notification:
+  # Sender-channel config.
+  email:
+    from: ${NOTIFICATION_EMAIL_FROM:heimcall@localhost}
+  webhook:
+    # Connect + read timeout for outbound webhook POSTs (ms).
+    timeout-ms: ${NOTIFICATION_WEBHOOK_TIMEOUT_MS:5000}
+  # Delivery worker + bounded-retry policy.
+  delivery:
+    poll-interval-ms: ${NOTIFICATION_POLL_INTERVAL_MS:5000}
+    max-attempts: ${NOTIFICATION_MAX_ATTEMPTS:3}
+    # Backoff before the next attempt = attempts * this (ms).
+    retry-backoff-ms: ${NOTIFICATION_RETRY_BACKOFF_MS:10000}
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info

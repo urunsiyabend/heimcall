@@ -2,7 +2,7 @@
 
 Living document. Update at the end of every sprint. Reflects what is actually built and running, not what is planned. Plan lives in `01-development-plan.md`; this file is the source of truth for "where are we now".
 
-Last updated: 2026-06-09 (end of Sprint 6)
+Last updated: 2026-06-09 (end of Sprint 7)
 
 ## 1. Snapshot
 
@@ -10,8 +10,8 @@ Last updated: 2026-06-09 (end of Sprint 6)
 | --- | --- |
 | Architecture | Microservices-first monorepo, Gradle multi-project |
 | Build | `./gradlew build` green on Java 21 |
-| Runtime verified | Sprint 6 escalation slice (policy/rule/target CRUD, routing->policy stamping, level-1 immediate, level-2 after wait, cancel on ACK, SCHEDULE target -> on-call) |
-| Last sprint | Sprint 6 - Phase 5 escalation-service |
+| Runtime verified | Sprint 7 notification slice (contact-method CRUD, request fan-out, EMAIL delivered to mailhog, WEBHOOK bounded-retry -> FAILED, delivered/failed events, idempotent on request eventId) |
+| Last sprint | Sprint 7 - Phase 6 notification-service |
 | Tests | First automated test: `OnCallCalculatorTest` (rotation math) |
 
 ## 2. Locked decisions
@@ -38,15 +38,16 @@ services/
   integration-service  webhook ingestion -> resolves key via identity -> stores raw -> publishes alert.received.v1 (acks=all)
   incident-service   consumes alert.received.v1 -> idempotency guard -> dedup -> routing/policy stamp -> incident + timeline -> REST; publishes incident.* ; DLT on failure
   escalation-service consumes incident.triggered -> runs policy (level tasks, worker, repeat) -> resolves targets -> notification.requested; cancels on ACK/RESOLVE (port 8086)
+  notification-service consumes notification.requested -> fans out to recipient contact methods -> delivers (email/webhook) with bounded retry -> notification.delivered/failed (port 8087)
 deploy/
-  docker-compose     postgres(5433, dbs: incident + integration + identity + catalog + schedule + escalation), kafka(9092 KRaft), redis(6379), mailhog(1025/8025)
+  docker-compose     postgres(5433, dbs: incident + integration + identity + catalog + schedule + escalation + notification), kafka(9092 KRaft), redis(6379), mailhog(1025/8025)
 ```
 
-Databases (one per service, single PG instance): `incident`, `integration`, `identity`, `catalog`, `schedule`, `escalation`.
+Databases (one per service, single PG instance): `incident`, `integration`, `identity`, `catalog`, `schedule`, `escalation`, `notification`.
 The non-default db/role are created by `deploy/docker-compose/initdb/01-create-databases.sql` on a fresh data
 volume; on an existing volume create them manually (see section 7).
 
-Ports: api-gateway 8080, integration 8081, incident 8082, identity 8083, service-catalog 8084, schedule 8085, escalation 8086.
+Ports: api-gateway 8080, integration 8081, incident 8082, identity 8083, service-catalog 8084, schedule 8085, escalation 8086, notification 8087.
 
 ## 4. Implemented behavior
 
@@ -145,22 +146,45 @@ Ports: api-gateway 8080, integration 8081, incident 8082, identity 8083, service
   check for service-catalog validation.
 - Resilience: `ErrorHandlingDeserializer` + bounded retry + DLT (mirrors incident-service Phase 3.5).
 
+### notification-service (port 8087)
+- Tenant rules via identity internal API (`IdentityClient`): caller membership (403), contact-method target user in org (409).
+- Persistence (Flyway V1): `contact_method` (org+user+channel+destination, enabled), `notification_request`
+  (PK = request eventId, doubles as idempotency ledger), `notification_delivery` (per contact method,
+  status/attempts/backoff, unique per (request, contact method)).
+- Contact methods (notification context owns them, plan 4.7): `POST/GET/PUT/DELETE
+  /v1/organizations/{orgId}/users/{userId}/contact-methods`. `channel` in {EMAIL, WEBHOOK}; `enabled`
+  doubles as a basic per-channel preference (PUT toggles it).
+- Consumer: `@KafkaListener` on `notification.requested.v1` -> persists the request (idempotent on
+  eventId) -> fans out to the recipient's **enabled** contact methods -> one PENDING `notification_delivery`
+  each. No enabled contact method -> nothing to deliver (logged).
+- Worker (`@Scheduled`, poll-interval-ms): fires due PENDING deliveries in their own tx. On success ->
+  DELIVERED + `notification.delivered.v1`. On failure -> retry with backoff (`attempts * retry-backoff-ms`)
+  up to `max-attempts` (default 3), then FAILED + `notification.failed.v1`. Delivery state is tracked
+  separately from incident/request state (engineering rule).
+- Senders: `EmailSender` (Spring `JavaMailSender` -> SMTP, mailhog locally) and `WebhookSender`
+  (HTTP POST of a JSON body, bounded connect/read timeout; non-2xx throws -> retry).
+- Visibility: `GET /v1/organizations/{orgId}/deliveries[?incidentId=&status=]` so failed messages are
+  operationally visible.
+- Resilience: `ErrorHandlingDeserializer` + bounded retry + DLT (mirrors incident-service Phase 3.5).
+
 ### Kafka topics in use
 - `alert.received.v1` (integration-service -> incident-service) + `alert.received.v1.DLT`
 - `incident.triggered.v1` / `incident.acknowledged.v1` / `incident.resolved.v1` (incident-service -> escalation-service)
-- `notification.requested.v1` (escalation-service -> [Phase 6 notification-service]; no consumer yet)
+- `notification.requested.v1` (escalation-service -> notification-service) + `notification.requested.v1.DLT`
+- `notification.delivered.v1` / `notification.failed.v1` (notification-service -> [no consumer yet; ops/timeline later])
 
-## 5. Verified end-to-end (Sprint 6)
+## 5. Verified end-to-end (Sprint 7)
 
-Live run, all six services + real Kafka/Postgres:
-- routing + stamping: service with `routing_key=payments-prod` -> incident stamped `escalationPolicyId`/`serviceId`/`routingKey`
-- cross-service policy validation: assigning the policy to the service succeeds only because escalation-service confirms it exists
-- level 1 fires immediately on trigger -> `notification.requested.v1` (targetSource USER)
-- level 2 fires after its wait (delay 8s) -> second `notification.requested.v1`
-- ACK before execution -> both pending tasks CANCELED, no notification emitted
-- SCHEDULE target -> resolved to the current on-call user via schedule internal on-call (`targetSource SCHEDULE`)
+Live run, notification-service + identity + real Kafka/Postgres/mailhog:
+- contact-method CRUD: registered EMAIL + WEBHOOK contact methods for an org member (member-gated)
+- request fan-out: one `notification.requested.v1` -> two PENDING deliveries (one per enabled contact method)
+- EMAIL: DELIVERED in 1 attempt -> message in mailhog (subject `[CRITICAL] Payment API 5xx high`) + `notification.delivered.v1`
+- WEBHOOK to a 404 endpoint: bounded retry attempts 1->2->3 with backoff -> FAILED + `notification.failed.v1` (reason recorded)
+- idempotency: redelivering the same request eventId created no new deliveries (count stayed 2)
+- delivery visibility: `GET /deliveries?incidentId=` shows both deliveries with status/attempts/lastError
 
-(Sprint 5 still holds: schedules, daily/weekly rotations, overrides, timezone-aware on-call; `OnCallCalculatorTest` green.
+(Sprint 6 still holds: escalation policy/rule/target CRUD, routing->policy stamping, level tasks + worker, cancel on ACK/RESOLVE,
+SCHEDULE target -> on-call. Sprint 5: schedules, rotations, overrides, timezone-aware on-call; `OnCallCalculatorTest` green.
 Sprint 4: monitored services, ownership, tags, gateway. Sprint 3: key issue/resolve, real tenant on ingest.
 Sprint 2: idempotency, DLT, broker-outage 503. Sprint 1: dedup, recovery, timeline.)
 
@@ -178,11 +202,14 @@ Sprint 2: idempotency, DLT, broker-outage 503. Sprint 1: dedup, recovery, timeli
 | DST transition-instant edge not tested; on-call has no Redis cache | later |
 | Separate Alert table (count lives on incident) | Phase 3 |
 | `processed_event` ledger has no TTL/pruning (grows unbounded) | later |
-| Transactional outbox; incident.* + notification.requested publish is at-least-once, no outbox | later |
+| Transactional outbox; incident.* + notification.* publish is at-least-once, no outbox | later |
 | Routing is a flat `routingKey -> service` map; no Opsgenie-style rule engine (labels/severity/time) | later |
-| `notification.requested` carries a fresh eventId per fire -> redelivery double-notifies until consumer dedups | Phase 6 |
 | TEAM target fan-out built (identity member list) but not runtime-exercised (USER + SCHEDULE were) | ongoing |
-| Notification delivery (email/telegram/webhook), no consumer for `notification.requested.v1` yet | Phase 6 |
+| Telegram channel (only EMAIL + WEBHOOK built) | later |
+| Notification preference is just per-contact-method `enabled`; no cooldown / per-incident throttle / quiet hours | later |
+| Contact-method `destination` not format-validated (email/url); no verification step | later |
+| No Redis notification-cooldown cache; delivery worker has no distributed lock (single instance assumed) | later |
+| `notification_delivered/failed` events have no consumer yet (timeline/ops reporting later) | Phase 7/8 |
 | Tests: only `OnCallCalculatorTest` so far; no integration/contract tests | ongoing |
 
 ## 7. How to run locally
@@ -202,7 +229,9 @@ docker exec heimcall-local-postgres-1 psql -U incident \
   -c "CREATE ROLE schedule WITH LOGIN PASSWORD 'schedule';" \
   -c "CREATE DATABASE schedule OWNER schedule;" \
   -c "CREATE ROLE escalation WITH LOGIN PASSWORD 'escalation';" \
-  -c "CREATE DATABASE escalation OWNER escalation;"
+  -c "CREATE DATABASE escalation OWNER escalation;" \
+  -c "CREATE ROLE notification WITH LOGIN PASSWORD 'notification';" \
+  -c "CREATE DATABASE notification OWNER notification;"
 # (or wipe and let initdb run: docker compose ... down -v && up -d)
 
 # 2. services (separate shells), JAVA_HOME must point at JDK 21
@@ -213,6 +242,7 @@ export JAVA_HOME=/usr/lib/jvm/java-21-openjdk
 ./gradlew :services:incident-service:bootRun
 ./gradlew :services:integration-service:bootRun
 ./gradlew :services:escalation-service:bootRun
+./gradlew :services:notification-service:bootRun
 
 # 3. bootstrap a tenant + issue a key, then ingest with it
 OID=$(curl -s -XPOST localhost:8083/v1/organizations -H 'Content-Type: application/json' \
@@ -233,8 +263,14 @@ curl localhost:8082/v1/incidents
 
 ## 8. Next sprint
 
-Phases 1 + 4 + 5 complete. Recommended: **Phase 6 - Notification Delivery** - add notification-service
-consuming `notification.requested.v1` with email (mailhog is already up) / telegram / webhook channels,
-a delivery-attempt log, bounded retry, provider-timeout + dead-letter handling, and a basic notification
-preference model. Closes the escalation loop (escalation requests -> actual delivery + idempotent consumer).
-Alternative: finish **Phase 3** (separate Alert table + lifecycle REST commands). Decide at sprint start.
+Phases 1 + 4 + 5 + 6 complete; the trigger->notify loop is closed end to end (alert -> incident ->
+escalation -> notification delivered/failed). Candidates for the next sprint:
+- **Phase 3 (finish)** - separate Alert table + incident lifecycle REST commands (ACK/resolve/cancel via API,
+  not only via inbound events). Gives the future UI real lifecycle endpoints.
+- **Phase 7 - UI** - incident list/detail/timeline, ACK/resolve buttons, service/schedule/policy management,
+  SSE/WebSocket updates. Needs the Phase 3 REST commands first.
+- **Phase 8 - Observability** - structured logging, correlation ids, Prometheus metrics, Kafka lag.
+- Cross-cutting hardening pulled forward from the gaps table: real JWT + Spring Security, transactional
+  outbox, Redis caches/cooldown, `processed_event` TTL.
+
+Decide at sprint start.

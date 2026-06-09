@@ -17,3 +17,6 @@ CREATE DATABASE schedule OWNER schedule;
 
 CREATE ROLE escalation WITH LOGIN PASSWORD 'escalation';
 CREATE DATABASE escalation OWNER escalation;
+
+CREATE ROLE notification WITH LOGIN PASSWORD 'notification';
+CREATE DATABASE notification OWNER notification;
