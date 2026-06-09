@@ -48,6 +48,15 @@ public class Incident {
     @Column(name = "alert_count", nullable = false)
     private int alertCount;
 
+    @Column(name = "routing_key")
+    private String routingKey;
+
+    @Column(name = "service_id")
+    private UUID serviceId;
+
+    @Column(name = "escalation_policy_id")
+    private UUID escalationPolicyId;
+
     @Column(name = "created_at", nullable = false)
     private Instant createdAt;
 
@@ -62,7 +71,7 @@ public class Incident {
 
     public static Incident trigger(UUID organizationId, String source, String dedupKey,
                                    String externalEntityId, String title, String description,
-                                   Severity severity, Instant occurredAt) {
+                                   Severity severity, String routingKey, Instant occurredAt) {
         Incident incident = new Incident();
         incident.id = UUID.randomUUID();
         incident.organizationId = organizationId;
@@ -74,10 +83,17 @@ public class Incident {
         incident.severity = severity != null ? severity : Severity.WARNING;
         incident.status = IncidentStatus.TRIGGERED;
         incident.alertCount = 1;
+        incident.routingKey = routingKey;
         incident.createdAt = occurredAt;
         incident.updatedAt = occurredAt;
         incident.lastEventAt = occurredAt;
         return incident;
+    }
+
+    /** Stamp the resolved routing/ownership from service-catalog (may be left null if unresolved). */
+    public void stampRouting(UUID serviceId, UUID escalationPolicyId) {
+        this.serviceId = serviceId;
+        this.escalationPolicyId = escalationPolicyId;
     }
 
     /** Collapse a duplicate signal onto this incident. */
@@ -141,6 +157,18 @@ public class Incident {
 
     public int getAlertCount() {
         return alertCount;
+    }
+
+    public String getRoutingKey() {
+        return routingKey;
+    }
+
+    public UUID getServiceId() {
+        return serviceId;
+    }
+
+    public UUID getEscalationPolicyId() {
+        return escalationPolicyId;
     }
 
     public Instant getCreatedAt() {

@@ -9,5 +9,6 @@ import java.util.UUID;
 public interface MonitoredServiceRepository extends JpaRepository<MonitoredService, UUID> {
     List<MonitoredService> findByOrganizationId(UUID organizationId);
     Optional<MonitoredService> findByIdAndOrganizationId(UUID id, UUID organizationId);
+    Optional<MonitoredService> findByOrganizationIdAndRoutingKey(UUID organizationId, String routingKey);
     boolean existsByOrganizationIdAndSlug(UUID organizationId, String slug);
 }

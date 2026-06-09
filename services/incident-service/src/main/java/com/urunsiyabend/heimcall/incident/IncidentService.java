@@ -8,14 +8,17 @@ import com.urunsiyabend.heimcall.incident.domain.ProcessedEvent;
 import com.urunsiyabend.heimcall.incident.domain.ProcessedEventRepository;
 import com.urunsiyabend.heimcall.incident.domain.TimelineEvent;
 import com.urunsiyabend.heimcall.incident.domain.TimelineEventRepository;
+import com.urunsiyabend.heimcall.incident.CatalogClient.Routing;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.time.Instant;
 import java.util.List;
 import java.util.Optional;
+import java.util.UUID;
 
 /**
  * Core incident engine: applies deduplication and the incident lifecycle rules
@@ -31,12 +34,17 @@ public class IncidentService {
     private final IncidentRepository incidents;
     private final TimelineEventRepository timeline;
     private final ProcessedEventRepository processedEvents;
+    private final CatalogClient catalog;
+    private final ApplicationEventPublisher events;
 
     public IncidentService(IncidentRepository incidents, TimelineEventRepository timeline,
-                           ProcessedEventRepository processedEvents) {
+                           ProcessedEventRepository processedEvents, CatalogClient catalog,
+                           ApplicationEventPublisher events) {
         this.incidents = incidents;
         this.timeline = timeline;
         this.processedEvents = processedEvents;
+        this.catalog = catalog;
+        this.events = events;
     }
 
     @Transactional
@@ -79,10 +87,23 @@ public class IncidentService {
         Incident incident = Incident.trigger(
                 event.organizationId(), event.source(), event.dedupKey(),
                 event.externalEntityId(), event.title(), event.description(),
-                event.severity(), at);
+                event.severity(), event.routingKey(), at);
+
+        // Resolve routing -> owning service + escalation policy (best-effort; incident is created regardless).
+        Optional<Routing> routing = catalog.resolve(event.organizationId(), event.routingKey());
+        UUID policyId = routing.map(Routing::escalationPolicyId).orElse(null);
+        incident.stampRouting(routing.map(Routing::serviceId).orElse(null), policyId);
+
         incidents.save(incident);
         timeline.save(TimelineEvent.of(incident.getId(), "TRIGGER", "Incident triggered: " + event.title(), at));
-        log.info("Incident {} triggered dedupKey={}", incident.getId(), event.dedupKey());
+        if (policyId == null) {
+            timeline.save(TimelineEvent.of(incident.getId(), "NO_POLICY",
+                    "No escalation policy resolved (routingKey=" + event.routingKey() + ")", at));
+        }
+        log.info("Incident {} triggered dedupKey={} policy={}", incident.getId(), event.dedupKey(), policyId);
+
+        events.publishEvent(new IncidentDomainEvents.Triggered(incident.getId(), incident.getOrganizationId(),
+                incident.getDedupKey(), incident.getTitle(), incident.getSeverity(), policyId, at));
     }
 
     private void resolve(Incident incident, Instant at) {
@@ -90,6 +111,7 @@ public class IncidentService {
         incidents.save(incident);
         timeline.save(TimelineEvent.of(incident.getId(), "RESOLVE", "Incident resolved by recovery event", at));
         log.info("Incident {} resolved by recovery", incident.getId());
+        events.publishEvent(new IncidentDomainEvents.Resolved(incident.getId(), incident.getOrganizationId(), at));
     }
 
     private void acknowledge(Incident incident, Instant at) {
@@ -97,5 +119,6 @@ public class IncidentService {
         incidents.save(incident);
         timeline.save(TimelineEvent.of(incident.getId(), "ACK", "Incident acknowledged by external event", at));
         log.info("Incident {} acknowledged", incident.getId());
+        events.publishEvent(new IncidentDomainEvents.Acknowledged(incident.getId(), incident.getOrganizationId(), at));
     }
 }

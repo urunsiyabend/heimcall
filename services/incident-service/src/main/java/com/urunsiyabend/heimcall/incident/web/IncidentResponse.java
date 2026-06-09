@@ -17,6 +17,9 @@ public record IncidentResponse(
         Severity severity,
         IncidentStatus status,
         int alertCount,
+        String routingKey,
+        UUID serviceId,
+        UUID escalationPolicyId,
         Instant createdAt,
         Instant updatedAt,
         Instant lastEventAt
@@ -25,6 +28,7 @@ public record IncidentResponse(
         return new IncidentResponse(
                 i.getId(), i.getOrganizationId(), i.getSource(), i.getDedupKey(),
                 i.getTitle(), i.getDescription(), i.getSeverity(), i.getStatus(),
-                i.getAlertCount(), i.getCreatedAt(), i.getUpdatedAt(), i.getLastEventAt());
+                i.getAlertCount(), i.getRoutingKey(), i.getServiceId(), i.getEscalationPolicyId(),
+                i.getCreatedAt(), i.getUpdatedAt(), i.getLastEventAt());
     }
 }

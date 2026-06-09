@@ -14,3 +14,6 @@ CREATE DATABASE catalog OWNER catalog;
 
 CREATE ROLE schedule WITH LOGIN PASSWORD 'schedule';
 CREATE DATABASE schedule OWNER schedule;
+
+CREATE ROLE escalation WITH LOGIN PASSWORD 'escalation';
+CREATE DATABASE escalation OWNER escalation;

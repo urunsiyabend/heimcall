@@ -1,5 +1,6 @@
 package com.urunsiyabend.heimcall.catalog.web;
 
+import com.urunsiyabend.heimcall.catalog.EscalationClient;
 import com.urunsiyabend.heimcall.catalog.IdentityClient;
 import com.urunsiyabend.heimcall.catalog.domain.MonitoredService;
 import com.urunsiyabend.heimcall.catalog.domain.MonitoredServiceRepository;
@@ -29,10 +30,13 @@ public class ServiceController {
 
     private final MonitoredServiceRepository services;
     private final IdentityClient identity;
+    private final EscalationClient escalation;
 
-    public ServiceController(MonitoredServiceRepository services, IdentityClient identity) {
+    public ServiceController(MonitoredServiceRepository services, IdentityClient identity,
+                             EscalationClient escalation) {
         this.services = services;
         this.identity = identity;
+        this.escalation = escalation;
     }
 
     public record CreateRequest(
@@ -50,11 +54,16 @@ public class ServiceController {
     public record AssignPolicyRequest(@NotNull UUID escalationPolicyId) {
     }
 
+    public record AssignRoutingKeyRequest(@NotBlank String routingKey) {
+    }
+
     public record ServiceResponse(UUID id, UUID organizationId, String name, String slug, String description,
-                                  UUID ownerTeamId, UUID escalationPolicyId, Instant createdAt, Instant updatedAt) {
+                                  UUID ownerTeamId, UUID escalationPolicyId, String routingKey,
+                                  Instant createdAt, Instant updatedAt) {
         static ServiceResponse of(MonitoredService s) {
             return new ServiceResponse(s.getId(), s.getOrganizationId(), s.getName(), s.getSlug(),
-                    s.getDescription(), s.getOwnerTeamId(), s.getEscalationPolicyId(), s.getCreatedAt(), s.getUpdatedAt());
+                    s.getDescription(), s.getOwnerTeamId(), s.getEscalationPolicyId(), s.getRoutingKey(),
+                    s.getCreatedAt(), s.getUpdatedAt());
         }
     }
 
@@ -112,14 +121,31 @@ public class ServiceController {
         return ServiceResponse.of(services.save(s));
     }
 
-    /** Placeholder until escalation-service exists: the id is stored but not validated. */
+    /** The policy is validated against escalation-service: unknown/foreign policy -> 409. */
     @PutMapping("/{id}/escalation-policy")
     public ServiceResponse assignPolicy(@PathVariable UUID orgId, @PathVariable UUID id,
                                         @RequestHeader("X-User-Id") UUID callerId,
                                         @Valid @RequestBody AssignPolicyRequest req) {
         identity.requireMember(orgId, callerId);
+        escalation.requirePolicyInOrg(orgId, req.escalationPolicyId());
         MonitoredService s = load(orgId, id);
         s.assignEscalationPolicy(req.escalationPolicyId(), Instant.now());
+        return ServiceResponse.of(services.save(s));
+    }
+
+    /** Map an inbound alert routingKey to this service. Unique per org -> 409 on collision. */
+    @PutMapping("/{id}/routing-key")
+    public ServiceResponse assignRoutingKey(@PathVariable UUID orgId, @PathVariable UUID id,
+                                            @RequestHeader("X-User-Id") UUID callerId,
+                                            @Valid @RequestBody AssignRoutingKeyRequest req) {
+        identity.requireMember(orgId, callerId);
+        services.findByOrganizationIdAndRoutingKey(orgId, req.routingKey())
+                .filter(other -> !other.getId().equals(id))
+                .ifPresent(other -> {
+                    throw new ApiExceptions.ConflictException("routing key already in use: " + req.routingKey());
+                });
+        MonitoredService s = load(orgId, id);
+        s.assignRoutingKey(req.routingKey(), Instant.now());
         return ServiceResponse.of(services.save(s));
     }
 

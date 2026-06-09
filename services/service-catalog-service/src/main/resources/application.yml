@@ -18,6 +18,9 @@ spring:
 identity:
   base-url: ${IDENTITY_BASE_URL:http://localhost:8083}
 
+escalation:
+  base-url: ${ESCALATION_BASE_URL:http://localhost:8086}
+
 management:
   endpoints:
     web:

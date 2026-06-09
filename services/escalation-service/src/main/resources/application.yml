@@ -1,0 +1,46 @@
+server:
+  port: 8086
+
+spring:
+  application:
+    name: escalation-service
+  datasource:
+    url: ${DB_URL:jdbc:postgresql://localhost:5433/escalation}
+    username: ${DB_USERNAME:escalation}
+    password: ${DB_PASSWORD:escalation}
+  jpa:
+    hibernate:
+      ddl-auto: validate
+    open-in-view: false
+  flyway:
+    enabled: true
+  kafka:
+    bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
+    consumer:
+      group-id: escalation-service.incident-consumer
+      auto-offset-reset: earliest
+      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      # ErrorHandlingDeserializer wraps JSON so a poison-pill is routed to the DLT instead of
+      # blocking the partition. Three incident topics carry three event types, so the concrete
+      # type is taken from the producer's type header (use.type.headers=true).
+      value-deserializer: org.springframework.kafka.support.serializer.ErrorHandlingDeserializer
+      properties:
+        spring.deserializer.value.delegate.class: org.springframework.kafka.support.serializer.JsonDeserializer
+        spring.json.trusted.packages: "com.urunsiyabend.heimcall.common.events,com.urunsiyabend.heimcall.common.domain"
+        spring.json.use.type.headers: true
+
+identity:
+  base-url: ${IDENTITY_BASE_URL:http://localhost:8083}
+schedule:
+  base-url: ${SCHEDULE_BASE_URL:http://localhost:8085}
+
+escalation:
+  # How often the worker scans for due escalation tasks.
+  worker:
+    poll-interval-ms: ${ESCALATION_POLL_INTERVAL_MS:5000}
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info

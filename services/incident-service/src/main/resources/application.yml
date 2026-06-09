@@ -30,6 +30,9 @@ spring:
         spring.json.value.default.type: com.urunsiyabend.heimcall.common.events.AlertReceivedEvent
         spring.json.use.type.headers: false
 
+catalog:
+  base-url: ${CATALOG_BASE_URL:http://localhost:8084}
+
 management:
   endpoints:
     web:

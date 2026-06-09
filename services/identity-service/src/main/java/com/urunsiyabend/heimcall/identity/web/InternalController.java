@@ -2,6 +2,8 @@ package com.urunsiyabend.heimcall.identity.web;
 
 import com.urunsiyabend.heimcall.identity.domain.MembershipRepository;
 import com.urunsiyabend.heimcall.identity.domain.Team;
+import com.urunsiyabend.heimcall.identity.domain.TeamMember;
+import com.urunsiyabend.heimcall.identity.domain.TeamMemberRepository;
 import com.urunsiyabend.heimcall.identity.domain.TeamRepository;
 import org.springframework.http.HttpStatus;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -10,6 +12,7 @@ import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.ResponseStatus;
 import org.springframework.web.bind.annotation.RestController;
 
+import java.util.List;
 import java.util.UUID;
 
 /**
@@ -22,10 +25,13 @@ public class InternalController {
 
     private final MembershipRepository memberships;
     private final TeamRepository teams;
+    private final TeamMemberRepository teamMembers;
 
-    public InternalController(MembershipRepository memberships, TeamRepository teams) {
+    public InternalController(MembershipRepository memberships, TeamRepository teams,
+                              TeamMemberRepository teamMembers) {
         this.memberships = memberships;
         this.teams = teams;
+        this.teamMembers = teamMembers;
     }
 
     public record TeamResponse(UUID id, UUID organizationId, String name) {
@@ -49,5 +55,13 @@ public class InternalController {
         return teams.findByIdAndOrganizationId(teamId, orgId)
                 .map(TeamResponse::of)
                 .orElseThrow(() -> new ApiExceptions.NotFoundException("team not found in organization"));
+    }
+
+    /** Member userIds of a team. 404 if the team does not belong to the org. Used by escalation TEAM-target fan-out. */
+    @GetMapping("/organizations/{orgId}/teams/{teamId}/members")
+    public List<UUID> teamMemberIds(@PathVariable UUID orgId, @PathVariable UUID teamId) {
+        teams.findByIdAndOrganizationId(teamId, orgId)
+                .orElseThrow(() -> new ApiExceptions.NotFoundException("team not found in organization"));
+        return teamMembers.findByTeamId(teamId).stream().map(TeamMember::getUserId).toList();
     }
 }

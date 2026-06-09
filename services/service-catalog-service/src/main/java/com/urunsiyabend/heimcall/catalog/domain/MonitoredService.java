@@ -10,7 +10,8 @@ import java.util.UUID;
 
 /**
  * A monitored service within an organization. {@code ownerTeamId} references a team in
- * identity-service; {@code escalationPolicyId} is a placeholder until escalation-service exists.
+ * identity-service; {@code escalationPolicyId} references a policy in escalation-service (validated
+ * on assignment). {@code routingKey} maps an inbound alert routingKey to this service.
  */
 @Entity
 @Table(name = "monitored_service")
@@ -36,6 +37,9 @@ public class MonitoredService {
 
     @Column(name = "escalation_policy_id")
     private UUID escalationPolicyId;
+
+    @Column(name = "routing_key")
+    private String routingKey;
 
     @Column(name = "created_at", nullable = false)
     private Instant createdAt;
@@ -75,6 +79,11 @@ public class MonitoredService {
         this.updatedAt = at;
     }
 
+    public void assignRoutingKey(String routingKey, Instant at) {
+        this.routingKey = routingKey;
+        this.updatedAt = at;
+    }
+
     public UUID getId() {
         return id;
     }
@@ -101,6 +110,10 @@ public class MonitoredService {
 
     public UUID getEscalationPolicyId() {
         return escalationPolicyId;
+    }
+
+    public String getRoutingKey() {
+        return routingKey;
     }
 
     public Instant getCreatedAt() {
