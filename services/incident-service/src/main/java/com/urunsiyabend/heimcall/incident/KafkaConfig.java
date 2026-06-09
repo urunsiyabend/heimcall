@@ -1,16 +1,23 @@
 package com.urunsiyabend.heimcall.incident;
 
+import org.apache.kafka.clients.consumer.ConsumerConfig;
 import org.apache.kafka.common.serialization.ByteArraySerializer;
+import org.apache.kafka.common.serialization.StringDeserializer;
 import org.apache.kafka.common.serialization.StringSerializer;
 import org.springframework.boot.autoconfigure.kafka.KafkaProperties;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.kafka.config.ConcurrentKafkaListenerContainerFactory;
+import org.springframework.kafka.core.ConsumerFactory;
+import org.springframework.kafka.core.DefaultKafkaConsumerFactory;
 import org.springframework.kafka.core.DefaultKafkaProducerFactory;
 import org.springframework.kafka.core.KafkaTemplate;
 import org.springframework.kafka.core.ProducerFactory;
 import org.springframework.kafka.listener.DeadLetterPublishingRecoverer;
 import org.springframework.kafka.listener.DefaultErrorHandler;
 import org.springframework.kafka.support.serializer.DelegatingByTypeSerializer;
+import org.springframework.kafka.support.serializer.ErrorHandlingDeserializer;
+import org.springframework.kafka.support.serializer.JsonDeserializer;
 import org.springframework.kafka.support.serializer.JsonSerializer;
 import org.springframework.util.backoff.FixedBackOff;
 
@@ -65,5 +72,35 @@ public class KafkaConfig {
     @Bean
     public KafkaTemplate<String, Object> eventsKafkaTemplate(ProducerFactory<String, Object> eventsProducerFactory) {
         return new KafkaTemplate<>(eventsProducerFactory);
+    }
+
+    // The default (Boot-autoconfigured) consumer pins every record to AlertReceivedEvent
+    // (use.type.headers=false). notification.delivered/failed carry two distinct types on two
+    // topics, so this consumer takes the concrete type from the producer's type header instead.
+    @Bean
+    public ConsumerFactory<String, Object> notificationConsumerFactory(KafkaProperties properties) {
+        Map<String, Object> props = properties.buildConsumerProperties(null);
+        props.put(ConsumerConfig.GROUP_ID_CONFIG, "incident-service.notification-consumer");
+        // The deserializer instance below is configured via setters; drop the yaml-inherited
+        // spring.json/spring.deserializer config props so it isn't configured "both" ways
+        // (JsonDeserializer rejects that combination).
+        props.keySet().removeIf(k -> k.startsWith("spring.json.") || k.startsWith("spring.deserializer."));
+        JsonDeserializer<Object> delegate = new JsonDeserializer<>();
+        delegate.addTrustedPackages(
+                "com.urunsiyabend.heimcall.common.events",
+                "com.urunsiyabend.heimcall.common.domain");
+        // Poison-pill safe: a malformed payload surfaces as a DeserializationException -> DLT.
+        ErrorHandlingDeserializer<Object> value = new ErrorHandlingDeserializer<>(delegate);
+        return new DefaultKafkaConsumerFactory<>(props, new StringDeserializer(), value);
+    }
+
+    @Bean
+    public ConcurrentKafkaListenerContainerFactory<String, Object> notificationListenerContainerFactory(
+            ConsumerFactory<String, Object> notificationConsumerFactory, DefaultErrorHandler errorHandler) {
+        ConcurrentKafkaListenerContainerFactory<String, Object> factory =
+                new ConcurrentKafkaListenerContainerFactory<>();
+        factory.setConsumerFactory(notificationConsumerFactory);
+        factory.setCommonErrorHandler(errorHandler);
+        return factory;
     }
 }

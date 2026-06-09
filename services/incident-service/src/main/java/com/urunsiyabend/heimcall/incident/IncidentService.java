@@ -3,6 +3,8 @@ package com.urunsiyabend.heimcall.incident;
 import com.urunsiyabend.heimcall.common.domain.AlertStatus;
 import com.urunsiyabend.heimcall.common.domain.IncidentStatus;
 import com.urunsiyabend.heimcall.common.events.AlertReceivedEvent;
+import com.urunsiyabend.heimcall.common.events.NotificationDeliveredEvent;
+import com.urunsiyabend.heimcall.common.events.NotificationFailedEvent;
 import com.urunsiyabend.heimcall.incident.domain.Alert;
 import com.urunsiyabend.heimcall.incident.domain.AlertOccurrence;
 import com.urunsiyabend.heimcall.incident.domain.AlertOccurrenceRepository;
@@ -188,6 +190,48 @@ public class IncidentService {
             log.debug("Recorded non-actionable alert dedupKey={}", event.dedupKey());
         }
         logOccurrence(alert.getId(), event, at);
+    }
+
+    /**
+     * Record a successful notification delivery on the incident timeline. Closes the feedback loop:
+     * notification-service publishes {@code notification.delivered.v1}, the incident shows who was
+     * notified and how. Idempotent on event id; tenant-checked against the incident's organization.
+     */
+    @Transactional
+    public void recordDelivered(NotificationDeliveredEvent event) {
+        appendNotificationTimeline(event.eventId(), event.organizationId(), event.incidentId(), "NOTIFIED",
+                "Notified user " + event.recipientUserId() + " via " + event.channel()
+                        + (event.destination() != null ? " (" + event.destination() + ")" : ""),
+                event.deliveredAt());
+    }
+
+    /** Record a failed notification (bounded retries exhausted) on the incident timeline. */
+    @Transactional
+    public void recordFailed(NotificationFailedEvent event) {
+        appendNotificationTimeline(event.eventId(), event.organizationId(), event.incidentId(), "NOTIFY_FAILED",
+                "Notification to user " + event.recipientUserId() + " via " + event.channel()
+                        + " failed after " + event.attempts() + " attempt(s): " + event.reason(),
+                event.failedAt());
+    }
+
+    private void appendNotificationTimeline(UUID eventId, UUID organizationId, UUID incidentId,
+                                            String type, String message, Instant at) {
+        // Idempotency: shares the processed_event ledger (event ids are globally unique UUIDs).
+        if (eventId != null && processedEvents.existsById(eventId)) {
+            log.debug("Skipping already-processed notification event {}", eventId);
+            return;
+        }
+        Instant when = at != null ? at : Instant.now();
+        if (incidentId != null) {
+            incidents.findById(incidentId)
+                    .filter(incident -> incident.getOrganizationId().equals(organizationId))
+                    .ifPresentOrElse(
+                            incident -> timeline.save(TimelineEvent.of(incident.getId(), type, message, when)),
+                            () -> log.warn("Notification event for unknown/foreign incident {}", incidentId));
+        }
+        if (eventId != null) {
+            processedEvents.save(new ProcessedEvent(eventId, Instant.now()));
+        }
     }
 
     /** Append the immutable per-signal record under the alert. */

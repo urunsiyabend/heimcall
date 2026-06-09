@@ -2,7 +2,7 @@
 
 Living document. Update at the end of every sprint. Reflects what is actually built and running, not what is planned. Plan lives in `01-development-plan.md`; this file is the source of truth for "where are we now".
 
-Last updated: 2026-06-09 (end of Sprint 8)
+Last updated: 2026-06-09 (Sprint 9 - Phase 7 ticket 1: notification feedback -> incident timeline)
 
 ## 1. Snapshot
 
@@ -140,6 +140,11 @@ Ports: api-gateway 8080, integration 8081, incident 8082, identity 8083, service
   `alert`, `alert_occurrence`
   - Incident-level partial unique index `(organization_id, dedup_key) WHERE status IN (TRIGGERED, ACKNOWLEDGED)`
     kept as a backstop alongside the alert-level open-dedup index.
+- Notification feedback loop (Phase 7 ticket 1): a second `@KafkaListener` (group
+  `incident-service.notification-consumer`, dedicated type-header container factory) consumes
+  `notification.delivered.v1`/`notification.failed.v1` and appends a `NOTIFIED`/`NOTIFY_FAILED`
+  timeline event. Idempotent on event id (shared `processed_event` ledger), tenant-checked against
+  the incident's org; unknown/foreign incident -> warn + no-op. Same `ErrorHandlingDeserializer`+DLT.
 - Queries: `GET /v1/incidents[?status=]`, `GET /v1/incidents/{id}`, `GET /v1/incidents/{id}/timeline`,
   `GET /v1/incidents/{id}/alerts`, `GET /v1/incidents/{id}/alerts/{alertId}/occurrences`
 
@@ -185,11 +190,16 @@ Ports: api-gateway 8080, integration 8081, incident 8082, identity 8083, service
 - `alert.received.v1` (integration-service -> incident-service) + `alert.received.v1.DLT`
 - `incident.triggered.v1` / `incident.acknowledged.v1` / `incident.resolved.v1` / `incident.canceled.v1` (incident-service -> escalation-service)
 - `notification.requested.v1` (escalation-service -> notification-service) + `notification.requested.v1.DLT`
-- `notification.delivered.v1` / `notification.failed.v1` (notification-service -> [no consumer yet; ops/timeline later])
+- `notification.delivered.v1` / `notification.failed.v1` (notification-service -> incident-service: appended to the incident timeline as NOTIFIED/NOTIFY_FAILED)
 
-## 5. Verified end-to-end (Sprint 8)
+## 5. Verified end-to-end (Sprint 9)
 
-Live run, incident + integration + identity + escalation + real Kafka/Postgres (Phase 3 finish):
+Live run, full 6-service path + real Kafka/Postgres (Phase 7 ticket 1):
+- CRITICAL ingest -> incident TRIGGER -> escalation runs policy (USER target, level 1 delay 0) ->
+  `notification.requested.v1` -> EMAIL delivered (mailhog) -> `notification.delivered.v1` ->
+  incident-service consumed it -> `NOTIFIED` timeline event on the incident (loop closed).
+
+Sprint 8 run, incident + integration + identity + escalation + real Kafka/Postgres (Phase 3 finish):
 - CRITICAL ingest -> alert OPEN + 1 occurrence + incident TRIGGERED
 - duplicate CRITICAL (same dedupKey) -> alert `occurrence_count=2`, 2 `alert_occurrence` rows, DUPLICATE timeline (incident not double-counted)
 - manual ACK (`POST /incidents/{id}/acknowledge`, `X-User-Id`) -> incident + linked alert ACKNOWLEDGED; repeat -> idempotent 200
@@ -228,7 +238,7 @@ Sprint 2: idempotency, DLT, broker-outage 503. Sprint 1: dedup, recovery, timeli
 | Notification preference is just per-contact-method `enabled`; no cooldown / per-incident throttle / quiet hours | later |
 | Contact-method `destination` not format-validated (email/url); no verification step | later |
 | No Redis notification-cooldown cache; delivery worker has no distributed lock (single instance assumed) | later |
-| `notification_delivered/failed` events have no consumer yet (timeline/ops reporting later) | Phase 7/8 |
+| ~~`notification_delivered/failed` events have no consumer yet~~ DONE: incident-service consumes both -> incident timeline (NOTIFIED/NOTIFY_FAILED) | Phase 7 ticket 1 |
 | Tests: only `OnCallCalculatorTest` so far; no integration/contract tests | ongoing |
 
 ## 7. How to run locally
@@ -284,8 +294,9 @@ curl localhost:8082/v1/incidents
 
 Phases 1 + 3 + 4 + 5 + 6 complete; the trigger->notify loop is closed end to end (event -> alert ->
 incident -> escalation -> notification) and incidents have real lifecycle REST commands. Candidates:
-- **Phase 7 - UI** - incident list/detail/timeline, ACK/resolve/cancel buttons, alert + occurrence view,
-  service/schedule/policy management, SSE/WebSocket updates. Phase 3 REST commands are now in place.
+- **Phase 7 - UI** - ticket 1 done (notification.delivered/failed -> incident timeline). Next:
+  incident list/detail/timeline, ACK/resolve/cancel buttons, alert + occurrence view,
+  service/schedule/policy management, SSE/WebSocket updates. Phase 3 REST commands are in place.
 - **Phase 8 - Observability** - structured logging, correlation ids, Prometheus metrics, Kafka lag.
 - Cross-cutting hardening from the gaps table: real JWT + Spring Security, transactional outbox,
   Redis caches/cooldown, `processed_event` TTL, `reassign` + `IncidentAssignment`.

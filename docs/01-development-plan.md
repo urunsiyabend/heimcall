@@ -767,6 +767,11 @@ Deliverables:
 - Escalation policy editor
 - WebSocket/SSE incident updates
 
+Ticket 1 (done, 2026-06-09): notification feedback loop. incident-service now consumes
+`notification.delivered.v1`/`notification.failed.v1` and appends `NOTIFIED`/`NOTIFY_FAILED` timeline
+events (idempotent on event id, tenant-checked). Closes the trigger->notify->timeline loop so the UI
+incident detail can show notification outcomes. Next: incident list/detail/timeline + ACK/resolve/cancel UI MVP.
+
 Recommended frontend:
 
 - React + Vite
