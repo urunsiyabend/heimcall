@@ -2,7 +2,7 @@
 
 Living document. Update at the end of every sprint. Reflects what is actually built and running, not what is planned. Plan lives in `01-development-plan.md`; this file is the source of truth for "where are we now".
 
-Last updated: 2026-06-09 (end of Sprint 7)
+Last updated: 2026-06-09 (end of Sprint 8)
 
 ## 1. Snapshot
 
@@ -10,8 +10,8 @@ Last updated: 2026-06-09 (end of Sprint 7)
 | --- | --- |
 | Architecture | Microservices-first monorepo, Gradle multi-project |
 | Build | `./gradlew build` green on Java 21 |
-| Runtime verified | Sprint 7 notification slice (contact-method CRUD, request fan-out, EMAIL delivered to mailhog, WEBHOOK bounded-retry -> FAILED, delivered/failed events, idempotent on request eventId) |
-| Last sprint | Sprint 7 - Phase 6 notification-service |
+| Runtime verified | Sprint 8 Phase-3 finish (Event->Alert->Incident: alert dedup aggregate + occurrence log, lifecycle REST commands ACK/resolve/cancel member-gated + idempotent, RECOVERY/INFO, alert-without-incident, escalation cancels on incident.canceled.v1) |
+| Last sprint | Sprint 8 - Phase 3 finish (Alert aggregate + incident lifecycle commands) |
 | Tests | First automated test: `OnCallCalculatorTest` (rotation math) |
 
 ## 2. Locked decisions
@@ -28,7 +28,7 @@ Last updated: 2026-06-09 (end of Sprint 7)
 ```
 libs/
   common-domain     enums: MessageType, Severity, IncidentStatus, AlertStatus
-  common-events      AlertReceivedEvent record, Topics constants
+  common-events      event records (Alert*, Incident triggered/acknowledged/resolved/canceled, Notification*), Topics constants
   test-support       Testcontainers singletons (PG + Kafka) - not yet used
 services/
   api-gateway        Spring Cloud Gateway, routes -> catalog 8084, schedule 8085, escalation 8086, identity 8083, integration 8081, incident 8082
@@ -36,7 +36,7 @@ services/
   service-catalog-service  monitored services CRUD + team ownership + tags + routing-key + validated escalation-policy + routing lookup (port 8084)
   schedule-service   on-call schedules, daily/weekly rotations, overrides, timezone-aware on-call resolution + internal on-call (port 8085)
   integration-service  webhook ingestion -> resolves key via identity -> stores raw -> publishes alert.received.v1 (acks=all)
-  incident-service   consumes alert.received.v1 -> idempotency guard -> dedup -> routing/policy stamp -> incident + timeline -> REST; publishes incident.* ; DLT on failure
+  incident-service   consumes alert.received.v1 -> Event->Alert->Incident (alert dedup aggregate + occurrence log) -> routing/policy stamp -> timeline; lifecycle REST commands ACK/resolve/cancel; publishes incident.* (incl. canceled); DLT on failure
   escalation-service consumes incident.triggered -> runs policy (level tasks, worker, repeat) -> resolves targets -> notification.requested; cancels on ACK/RESOLVE (port 8086)
   notification-service consumes notification.requested -> fans out to recipient contact methods -> delivers (email/webhook) with bounded retry -> notification.delivered/failed (port 8087)
 deploy/
@@ -111,23 +111,37 @@ Ports: api-gateway 8080, integration 8081, incident 8082, identity 8083, service
 ### incident-service (port 8082)
 - `@KafkaListener` on `alert.received.v1`
 - Idempotency guard: `processed_event(event_id)` ledger (Flyway V2) written in the same tx as the
-  incident change; a redelivered event whose id is already recorded is a no-op
+  change; a redelivered event whose id is already recorded is a no-op
 - Resilience: `ErrorHandlingDeserializer` (poison-pill safe) + `DefaultErrorHandler` with bounded
   retry (1 + 2 retries, 1s apart) then `DeadLetterPublishingRecoverer` -> `alert.received.v1.DLT`
-- Lifecycle rules:
-  - CRITICAL / WARNING -> trigger new incident, or increment alertCount on existing open incident (+ DUPLICATE timeline)
-  - RECOVERY -> resolve open incident
-  - ACKNOWLEDGEMENT -> acknowledge open incident
-  - INFO -> ignored
-- Routing/ownership stamping (Phase 5): on a new trigger, `CatalogClient` resolves the alert routingKey
-  to `{serviceId, escalationPolicyId}` and stamps them on the incident (Flyway V3). Best-effort: a missing
-  mapping, a catalog error, or an unreachable catalog still creates the incident (a `NO_POLICY` timeline
-  event is appended); the core path never depends on escalation.
-- Domain events: publishes `incident.triggered/acknowledged/resolved.v1` via a `@TransactionalEventListener`
-  (`AFTER_COMMIT`) so a rolled-back change emits no ghost event. At-least-once (no outbox yet).
-- Persistence (Flyway V1+V3): `incident` (+ `routing_key`, `service_id`, `escalation_policy_id`), `incident_timeline_event`
-  - Partial unique index `(organization_id, dedup_key) WHERE status IN (TRIGGERED, ACKNOWLEDGED)` enforces one open incident per dedup key
-- Queries: `GET /v1/incidents[?status=]`, `GET /v1/incidents/{id}`, `GET /v1/incidents/{id}/timeline`
+- Domain flow `Event -> Alert -> Incident` (glossary §2). Every inbound signal is logged as an
+  `alert_occurrence` under the deduplicated `alert` aggregate; an actionable alert opens an incident:
+  - **Alert** = dedup aggregate: at most one OPEN alert per `(org, dedupKey)` (partial unique index
+    `ux_alert_open_dedup`); repeats bump `occurrence_count` + `last_seen_at`. `incident_id` is nullable
+    (an alert MAY exist without an incident).
+  - **alert_occurrence** = immutable per-signal log (one row per inbound event: messageType, severity,
+    occurred_at, received_at, event_id -> integration raw event).
+  - CRITICAL / WARNING -> open alert (or dedup onto the open one) and, on a new alert, open an incident
+    + DUPLICATE timeline on a repeat. RECOVERY -> close the alert + resolve its incident.
+    ACKNOWLEDGEMENT -> acknowledge the alert + its TRIGGERED incident. INFO -> record a (no-incident) alert.
+- Lifecycle REST commands (operator actions): `POST /v1/incidents/{id}/{acknowledge,resolve,cancel}`
+  - member-gated via identity (`IdentityClient.requireMember`, `X-User-Id`): non-member -> 403, identity
+    unreachable -> 503; idempotent (no-op when already in the target state); illegal transition -> 409
+  - each appends a timeline event (records the actor) and publishes the matching domain event; the
+    linked OPEN/ACK alerts are transitioned to follow the incident (ACK -> ACKNOWLEDGED, resolve/cancel -> CLOSED)
+  - `reassign` not built (needs `IncidentAssignment`); cancel emits the new `incident.canceled.v1`
+- Routing/ownership stamping (Phase 5): on a new trigger, `CatalogClient` resolves the routingKey to
+  `{serviceId, escalationPolicyId}` and stamps them (Flyway V3). Best-effort: a missing mapping / catalog
+  error / unreachable catalog still creates the incident (`NO_POLICY` timeline event); core never depends on it.
+- Domain events: publishes `incident.triggered/acknowledged/resolved/canceled.v1` via a
+  `@TransactionalEventListener` (`AFTER_COMMIT`) so a rolled-back change emits no ghost event. At-least-once.
+- Persistence (Flyway V1-V4): `incident` (`alert_count` dropped in V4; still carries `routing_key`,
+  `service_id`, `escalation_policy_id`, `dedup_key`/`source`/`external_entity_id`), `incident_timeline_event`,
+  `alert`, `alert_occurrence`
+  - Incident-level partial unique index `(organization_id, dedup_key) WHERE status IN (TRIGGERED, ACKNOWLEDGED)`
+    kept as a backstop alongside the alert-level open-dedup index.
+- Queries: `GET /v1/incidents[?status=]`, `GET /v1/incidents/{id}`, `GET /v1/incidents/{id}/timeline`,
+  `GET /v1/incidents/{id}/alerts`, `GET /v1/incidents/{id}/alerts/{alertId}/occurrences`
 
 ### escalation-service (port 8086)
 - Tenant rules via identity internal API (`IdentityClient`): caller membership (403), USER/TEAM targets in org (409).
@@ -141,7 +155,7 @@ Ports: api-gateway 8080, integration 8081, incident 8082, identity 8083, service
 - Worker (`@Scheduled`, poll-interval-ms): fires due PENDING tasks in their own tx; resolves targets
   (USER direct, SCHEDULE -> schedule internal on-call, TEAM -> identity member list) -> publishes one
   `notification.requested.v1` per recipient; marks EXECUTED. A dependency error leaves the task PENDING (retried).
-- Cancellation: consumes `incident.acknowledged/resolved.v1` -> cancels still-PENDING tasks for the incident.
+- Cancellation: consumes `incident.acknowledged/resolved/canceled.v1` -> cancels still-PENDING tasks for the incident.
 - Internal: `GET /v1/internal/organizations/{orgId}/escalation-policies/{policyId}` (204/404) - policy existence
   check for service-catalog validation.
 - Resilience: `ErrorHandlingDeserializer` + bounded retry + DLT (mirrors incident-service Phase 3.5).
@@ -169,21 +183,25 @@ Ports: api-gateway 8080, integration 8081, incident 8082, identity 8083, service
 
 ### Kafka topics in use
 - `alert.received.v1` (integration-service -> incident-service) + `alert.received.v1.DLT`
-- `incident.triggered.v1` / `incident.acknowledged.v1` / `incident.resolved.v1` (incident-service -> escalation-service)
+- `incident.triggered.v1` / `incident.acknowledged.v1` / `incident.resolved.v1` / `incident.canceled.v1` (incident-service -> escalation-service)
 - `notification.requested.v1` (escalation-service -> notification-service) + `notification.requested.v1.DLT`
 - `notification.delivered.v1` / `notification.failed.v1` (notification-service -> [no consumer yet; ops/timeline later])
 
-## 5. Verified end-to-end (Sprint 7)
+## 5. Verified end-to-end (Sprint 8)
 
-Live run, notification-service + identity + real Kafka/Postgres/mailhog:
-- contact-method CRUD: registered EMAIL + WEBHOOK contact methods for an org member (member-gated)
-- request fan-out: one `notification.requested.v1` -> two PENDING deliveries (one per enabled contact method)
-- EMAIL: DELIVERED in 1 attempt -> message in mailhog (subject `[CRITICAL] Payment API 5xx high`) + `notification.delivered.v1`
-- WEBHOOK to a 404 endpoint: bounded retry attempts 1->2->3 with backoff -> FAILED + `notification.failed.v1` (reason recorded)
-- idempotency: redelivering the same request eventId created no new deliveries (count stayed 2)
-- delivery visibility: `GET /deliveries?incidentId=` shows both deliveries with status/attempts/lastError
+Live run, incident + integration + identity + escalation + real Kafka/Postgres (Phase 3 finish):
+- CRITICAL ingest -> alert OPEN + 1 occurrence + incident TRIGGERED
+- duplicate CRITICAL (same dedupKey) -> alert `occurrence_count=2`, 2 `alert_occurrence` rows, DUPLICATE timeline (incident not double-counted)
+- manual ACK (`POST /incidents/{id}/acknowledge`, `X-User-Id`) -> incident + linked alert ACKNOWLEDGED; repeat -> idempotent 200
+- manual resolve -> incident RESOLVED + alert CLOSED; a follow-up cancel on the RESOLVED incident -> 409
+- non-member ACK -> 403
+- RECOVERY -> alert CLOSED + incident RESOLVED
+- INFO -> alert recorded with `incident_id` NULL (alert-without-incident)
+- manual cancel -> incident CANCELED + alert CLOSED; escalation consumed `incident.canceled.v1` (processed-event ledger advanced)
 
-(Sprint 6 still holds: escalation policy/rule/target CRUD, routing->policy stamping, level tasks + worker, cancel on ACK/RESOLVE,
+(Sprint 7 still holds: contact-method CRUD, request fan-out, EMAIL -> mailhog DELIVERED, WEBHOOK bounded-retry -> FAILED,
+delivered/failed events, idempotent on request eventId.
+Sprint 6 still holds: escalation policy/rule/target CRUD, routing->policy stamping, level tasks + worker, cancel on ACK/RESOLVE,
 SCHEDULE target -> on-call. Sprint 5: schedules, rotations, overrides, timezone-aware on-call; `OnCallCalculatorTest` green.
 Sprint 4: monitored services, ownership, tags, gateway. Sprint 3: key issue/resolve, real tenant on ingest.
 Sprint 2: idempotency, DLT, broker-outage 503. Sprint 1: dedup, recovery, timeline.)
@@ -200,7 +218,8 @@ Sprint 2: idempotency, DLT, broker-outage 503. Sprint 1: dedup, recovery, timeli
 | Single owning team only; multi-team ownership table | later |
 | Rotation length DAILY/WEEKLY only; custom N-day rotations | later |
 | DST transition-instant edge not tested; on-call has no Redis cache | later |
-| Separate Alert table (count lives on incident) | Phase 3 |
+| `reassign` endpoint + `IncidentAssignment` model | later |
+| Incident not fully leaned: still carries `dedup_key`/`source`/`external_entity_id` + backstop open-dedup index | later |
 | `processed_event` ledger has no TTL/pruning (grows unbounded) | later |
 | Transactional outbox; incident.* + notification.* publish is at-least-once, no outbox | later |
 | Routing is a flat `routingKey -> service` map; no Opsgenie-style rule engine (labels/severity/time) | later |
@@ -263,14 +282,12 @@ curl localhost:8082/v1/incidents
 
 ## 8. Next sprint
 
-Phases 1 + 4 + 5 + 6 complete; the trigger->notify loop is closed end to end (alert -> incident ->
-escalation -> notification delivered/failed). Candidates for the next sprint:
-- **Phase 3 (finish)** - separate Alert table + incident lifecycle REST commands (ACK/resolve/cancel via API,
-  not only via inbound events). Gives the future UI real lifecycle endpoints.
-- **Phase 7 - UI** - incident list/detail/timeline, ACK/resolve buttons, service/schedule/policy management,
-  SSE/WebSocket updates. Needs the Phase 3 REST commands first.
+Phases 1 + 3 + 4 + 5 + 6 complete; the trigger->notify loop is closed end to end (event -> alert ->
+incident -> escalation -> notification) and incidents have real lifecycle REST commands. Candidates:
+- **Phase 7 - UI** - incident list/detail/timeline, ACK/resolve/cancel buttons, alert + occurrence view,
+  service/schedule/policy management, SSE/WebSocket updates. Phase 3 REST commands are now in place.
 - **Phase 8 - Observability** - structured logging, correlation ids, Prometheus metrics, Kafka lag.
-- Cross-cutting hardening pulled forward from the gaps table: real JWT + Spring Security, transactional
-  outbox, Redis caches/cooldown, `processed_event` TTL.
+- Cross-cutting hardening from the gaps table: real JWT + Spring Security, transactional outbox,
+  Redis caches/cooldown, `processed_event` TTL, `reassign` + `IncidentAssignment`.
 
 Decide at sprint start.

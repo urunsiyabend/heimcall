@@ -610,6 +610,28 @@ Acceptance focus:
 - ACK stops escalation eligibility.
 - RESOLVED incident is not mutated by another CRITICAL event; a new incident may be opened depending on reopen policy.
 
+Sprint 1 (2026-06-05) delivered the inbound-signal-driven core (dedup, recovery, timeline) with the
+count living on the incident. Sprint 8 (2026-06-09) finished the phase per the glossary domain model:
+
+- `Event -> Alert -> Incident` flow made explicit. **Alert** is now a first-class dedup aggregate
+  (`alert` table): one OPEN alert per `(org, dedupKey)`, repeats bump `occurrence_count`. An alert MAY
+  exist without an incident (INFO / non-actionable). An **`alert_occurrence`** table is the immutable
+  per-signal log (one row per inbound event hitting the alert). The incident no longer owns a counter
+  (`alert_count` dropped); the incident-level open-dedup unique index stays as a backstop.
+- **Lifecycle REST commands** (operator actions, distinct from the signal path):
+  `POST /v1/incidents/{id}/{acknowledge,resolve,cancel}` - member-gated (`X-User-Id` via identity),
+  idempotent (no-op when already in target state), illegal transition -> 409, timeline event each,
+  publishes the matching domain event. New `incident.canceled.v1` event; escalation-service cancels
+  pending tasks on it (mirrors ACK/resolve). Manual commands also sync the linked alert's status.
+
+Deferred from Phase 3 (carry forward):
+
+- `reassign` endpoint + `IncidentAssignment` model (plan 4.4) not built.
+- Incident not yet fully leaned: it still carries `dedup_key`/`source`/`external_entity_id` for display
+  + the backstop index; a thinner incident is a later cleanup.
+- INFO now records a (no-incident) alert instead of being fully ignored.
+- Automated tests - verification was manual curl + live Kafka/Postgres only.
+
 ## Phase 3.5 - Reliability and Idempotency
 
 Goal: make the alert -> incident path safe under Kafka failures and redelivery. Inserted after Phase 3 because the core consumer is where these failure modes first bite. Should be done before adding more consumers (escalation, notification), not deferred to the end.

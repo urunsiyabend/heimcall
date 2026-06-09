@@ -33,6 +33,9 @@ spring:
 catalog:
   base-url: ${CATALOG_BASE_URL:http://localhost:8084}
 
+identity:
+  base-url: ${IDENTITY_BASE_URL:http://localhost:8083}
+
 management:
   endpoints:
     web:

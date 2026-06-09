@@ -12,6 +12,7 @@ public final class Topics {
     public static final String INCIDENT_TRIGGERED = "incident.triggered.v1";
     public static final String INCIDENT_ACKNOWLEDGED = "incident.acknowledged.v1";
     public static final String INCIDENT_RESOLVED = "incident.resolved.v1";
+    public static final String INCIDENT_CANCELED = "incident.canceled.v1";
     public static final String ESCALATION_REQUESTED = "escalation.requested.v1";
     public static final String NOTIFICATION_REQUESTED = "notification.requested.v1";
     public static final String NOTIFICATION_DELIVERED = "notification.delivered.v1";

@@ -1,6 +1,7 @@
 package com.urunsiyabend.heimcall.incident;
 
 import com.urunsiyabend.heimcall.common.events.IncidentAcknowledgedEvent;
+import com.urunsiyabend.heimcall.common.events.IncidentCanceledEvent;
 import com.urunsiyabend.heimcall.common.events.IncidentResolvedEvent;
 import com.urunsiyabend.heimcall.common.events.IncidentTriggeredEvent;
 import com.urunsiyabend.heimcall.common.events.Topics;
@@ -49,6 +50,13 @@ public class IncidentEventPublisher {
         IncidentResolvedEvent payload = new IncidentResolvedEvent(UUID.randomUUID(), e.at(),
                 e.organizationId(), e.incidentId());
         send(Topics.INCIDENT_RESOLVED, e.incidentId(), payload);
+    }
+
+    @TransactionalEventListener(phase = TransactionPhase.AFTER_COMMIT)
+    public void onCanceled(IncidentDomainEvents.Canceled e) {
+        IncidentCanceledEvent payload = new IncidentCanceledEvent(UUID.randomUUID(), e.at(),
+                e.organizationId(), e.incidentId());
+        send(Topics.INCIDENT_CANCELED, e.incidentId(), payload);
     }
 
     private void send(String topic, UUID incidentId, Object payload) {

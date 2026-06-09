@@ -45,9 +45,6 @@ public class Incident {
     @Column(nullable = false)
     private IncidentStatus status;
 
-    @Column(name = "alert_count", nullable = false)
-    private int alertCount;
-
     @Column(name = "routing_key")
     private String routingKey;
 
@@ -82,7 +79,6 @@ public class Incident {
         incident.description = description;
         incident.severity = severity != null ? severity : Severity.WARNING;
         incident.status = IncidentStatus.TRIGGERED;
-        incident.alertCount = 1;
         incident.routingKey = routingKey;
         incident.createdAt = occurredAt;
         incident.updatedAt = occurredAt;
@@ -96,9 +92,8 @@ public class Incident {
         this.escalationPolicyId = escalationPolicyId;
     }
 
-    /** Collapse a duplicate signal onto this incident. */
-    public void registerDuplicate(Instant occurredAt) {
-        this.alertCount += 1;
+    /** Touch the incident on a duplicate signal (the count itself lives on the linked alert). */
+    public void touch(Instant occurredAt) {
         this.lastEventAt = occurredAt;
         this.updatedAt = occurredAt;
     }
@@ -111,6 +106,12 @@ public class Incident {
 
     public void resolve(Instant at) {
         this.status = IncidentStatus.RESOLVED;
+        this.updatedAt = at;
+        this.lastEventAt = at;
+    }
+
+    public void cancel(Instant at) {
+        this.status = IncidentStatus.CANCELED;
         this.updatedAt = at;
         this.lastEventAt = at;
     }
@@ -153,10 +154,6 @@ public class Incident {
 
     public IncidentStatus getStatus() {
         return status;
-    }
-
-    public int getAlertCount() {
-        return alertCount;
     }
 
     public String getRoutingKey() {

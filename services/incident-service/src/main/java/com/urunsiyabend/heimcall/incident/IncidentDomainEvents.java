@@ -24,4 +24,7 @@ final class IncidentDomainEvents {
 
     record Resolved(UUID incidentId, UUID organizationId, Instant at) {
     }
+
+    record Canceled(UUID incidentId, UUID organizationId, Instant at) {
+    }
 }

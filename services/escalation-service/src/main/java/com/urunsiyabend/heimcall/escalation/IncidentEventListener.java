@@ -1,6 +1,7 @@
 package com.urunsiyabend.heimcall.escalation;
 
 import com.urunsiyabend.heimcall.common.events.IncidentAcknowledgedEvent;
+import com.urunsiyabend.heimcall.common.events.IncidentCanceledEvent;
 import com.urunsiyabend.heimcall.common.events.IncidentResolvedEvent;
 import com.urunsiyabend.heimcall.common.events.IncidentTriggeredEvent;
 import com.urunsiyabend.heimcall.common.events.Topics;
@@ -30,5 +31,10 @@ public class IncidentEventListener {
     @KafkaListener(topics = Topics.INCIDENT_RESOLVED, groupId = "escalation-service.incident-consumer")
     public void onResolved(IncidentResolvedEvent event) {
         escalationService.onIncidentClosed(event.eventId(), event.incidentId(), "RESOLVE");
+    }
+
+    @KafkaListener(topics = Topics.INCIDENT_CANCELED, groupId = "escalation-service.incident-consumer")
+    public void onCanceled(IncidentCanceledEvent event) {
+        escalationService.onIncidentClosed(event.eventId(), event.incidentId(), "CANCEL");
     }
 }
