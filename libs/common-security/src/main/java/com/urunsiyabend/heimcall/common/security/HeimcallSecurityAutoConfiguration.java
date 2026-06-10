@@ -1,5 +1,6 @@
 package com.urunsiyabend.heimcall.common.security;
 
+import jakarta.servlet.DispatcherType;
 import org.springframework.boot.autoconfigure.AutoConfiguration;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
@@ -44,6 +45,9 @@ public class HeimcallSecurityAutoConfiguration {
                 .formLogin(AbstractHttpConfigurer::disable)
                 .sessionManagement(s -> s.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
                 .authorizeHttpRequests(auth -> auth
+                        // Servlet ERROR/FORWARD dispatches (e.g. a 400 routed to /error) must not be
+                        // re-authenticated, else the real error status is masked as 401.
+                        .dispatcherTypeMatchers(DispatcherType.ERROR, DispatcherType.FORWARD).permitAll()
                         .requestMatchers("/actuator/**").permitAll()
                         .requestMatchers(HttpMethod.POST, "/v1/auth/login", "/v1/auth/register", "/v1/auth/refresh").permitAll()
                         .requestMatchers("/v1/internal/**").permitAll()

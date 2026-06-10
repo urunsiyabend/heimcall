@@ -11,4 +11,8 @@ public interface IncidentRepository extends JpaRepository<Incident, UUID> {
     List<Incident> findByStatusOrderByCreatedAtDesc(IncidentStatus status);
 
     List<Incident> findAllByOrderByCreatedAtDesc();
+
+    List<Incident> findByOrganizationIdOrderByCreatedAtDesc(UUID organizationId);
+
+    List<Incident> findByOrganizationIdAndStatusOrderByCreatedAtDesc(UUID organizationId, IncidentStatus status);
 }
