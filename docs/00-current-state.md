@@ -2,7 +2,7 @@
 
 Living document. Update at the end of every sprint. Reflects what is actually built and running, not what is planned. Plan lives in `01-development-plan.md`; this file is the source of truth for "where are we now".
 
-Last updated: 2026-06-09 (Sprint 9 - Phase 7 ticket 1: notification feedback -> incident timeline)
+Last updated: 2026-06-10 (Sprint 9 - Phase 7 tickets 1-3.1: notification feedback + real JWT auth)
 
 ## 1. Snapshot
 
@@ -10,9 +10,10 @@ Last updated: 2026-06-09 (Sprint 9 - Phase 7 ticket 1: notification feedback -> 
 | --- | --- |
 | Architecture | Microservices-first monorepo, Gradle multi-project |
 | Build | `./gradlew build` green on Java 21 |
-| Runtime verified | Sprint 8 Phase-3 finish (Event->Alert->Incident: alert dedup aggregate + occurrence log, lifecycle REST commands ACK/resolve/cancel member-gated + idempotent, RECOVERY/INFO, alert-without-incident, escalation cancels on incident.canceled.v1) |
-| Last sprint | Sprint 8 - Phase 3 finish (Alert aggregate + incident lifecycle commands) |
+| Runtime verified | Sprint 9 Phase-7 tickets 1-3.1: full loop under real JWT through the gateway (register/login -> token -> CRUD across all services -> ingest -> incident TRIGGER + NOTIFIED), JWT enforced (401 no-token, refresh-as-access rejected, client X-User-Id spoof stripped), incident queries tenant-scoped (cross-org 403) |
+| Last sprint | Sprint 9 - Phase 7 tickets 1-3.1 (notification->timeline, real JWT auth across all services + gateway, tenant-scoped incident queries) |
 | Tests | First automated test: `OnCallCalculatorTest` (rotation math) |
+| Auth | Real JWT (HS256, `libs/common-security`): identity issues access+refresh; every service validates Bearer and derives `X-User-Id` from the verified token. Header-context stub retired. |
 
 ## 2. Locked decisions
 
@@ -29,10 +30,11 @@ Last updated: 2026-06-09 (Sprint 9 - Phase 7 ticket 1: notification feedback -> 
 libs/
   common-domain     enums: MessageType, Severity, IncidentStatus, AlertStatus
   common-events      event records (Alert*, Incident triggered/acknowledged/resolved/canceled, Notification*), Topics constants
+  common-security    HS256 JWT auto-config: JwtSupport (issue/verify), JwtAuthenticationFilter (Bearer -> principal + derives X-User-Id), stateless SecurityFilterChain. Added by every service via one dependency.
   test-support       Testcontainers singletons (PG + Kafka) - not yet used
 services/
-  api-gateway        Spring Cloud Gateway, routes -> catalog 8084, schedule 8085, escalation 8086, identity 8083, integration 8081, incident 8082
-  identity-service   org/user/team/membership CRUD + integration-key issue/resolve + internal lookups, incl. team-member list (port 8083)
+  api-gateway        Spring Cloud Gateway, routes -> catalog 8084, schedule 8085, escalation 8086, identity 8083 (incl. /v1/auth/**), integration 8081, incident 8082; CORS for the UI origin; forwards Authorization (validation is per-service)
+  identity-service   auth (register/login/refresh/me, JWT) + org/user/team/membership CRUD + integration-key issue/resolve + internal lookups, incl. team-member list (port 8083)
   service-catalog-service  monitored services CRUD + team ownership + tags + routing-key + validated escalation-policy + routing lookup (port 8084)
   schedule-service   on-call schedules, daily/weekly rotations, overrides, timezone-aware on-call resolution + internal on-call (port 8085)
   integration-service  webhook ingestion -> resolves key via identity -> stores raw -> publishes alert.received.v1 (acks=all)
@@ -52,10 +54,14 @@ Ports: api-gateway 8080, integration 8081, incident 8082, identity 8083, service
 ## 4. Implemented behavior
 
 ### identity-service (port 8083)
-- Tenant isolation is a **header-context stub**: org-scoped endpoints take `X-User-Id`; `TenantGuard`
-  requires an existing membership in the path `orgId`, else 403 (missing header -> 400). JWT deferred.
-- Persistence (Flyway V1): `organization`, `app_user`, `membership` (org role), `team`, `team_member`,
-  `integration_key`
+- **Auth (Phase 7 tickets 2-3, real JWT)**: `POST /v1/auth/register` (BCrypt password), `POST /v1/auth/login`
+  -> `{accessToken, refreshToken, user}` (access 60m, refresh 30d, HS256 via `common-security`),
+  `POST /v1/auth/refresh`, `GET /v1/auth/me` (user + memberships). `password_hash` on `app_user` (Flyway V2).
+- Tenant isolation: callers authenticate with a Bearer JWT; the shared filter validates it and derives
+  `X-User-Id` from the verified subject, so `TenantGuard` (membership-in-`orgId`, else 403) now runs off a
+  signed token, not a client-trusted header. The old header-context stub is retired.
+- Persistence (Flyway V1-V2): `organization`, `app_user` (+ `password_hash`), `membership` (org role),
+  `team`, `team_member`, `integration_key`
 - Org/User: `POST/GET /v1/organizations`, `POST/GET /v1/users`
 - Membership: `POST/GET /v1/organizations/{orgId}/memberships` - the **first** membership of an org is a
   bootstrap (no caller header needed); every later add must come from an existing member
@@ -145,8 +151,10 @@ Ports: api-gateway 8080, integration 8081, incident 8082, identity 8083, service
   `notification.delivered.v1`/`notification.failed.v1` and appends a `NOTIFIED`/`NOTIFY_FAILED`
   timeline event. Idempotent on event id (shared `processed_event` ledger), tenant-checked against
   the incident's org; unknown/foreign incident -> warn + no-op. Same `ErrorHandlingDeserializer`+DLT.
-- Queries: `GET /v1/incidents[?status=]`, `GET /v1/incidents/{id}`, `GET /v1/incidents/{id}/timeline`,
-  `GET /v1/incidents/{id}/alerts`, `GET /v1/incidents/{id}/alerts/{alertId}/occurrences`
+- Queries (tenant-scoped, Phase 7 ticket 3.1): `GET /v1/incidents?organizationId=&status=` (member-gated,
+  org-filtered), `GET /v1/incidents/{id}`, `.../timeline`, `.../alerts`, `.../alerts/{alertId}/occurrences`
+  - each per-incident read derives the org from the incident and enforces caller membership: 404 if absent,
+    403 if not a member (closes the prior gap where queries returned incidents across all tenants).
 
 ### escalation-service (port 8086)
 - Tenant rules via identity internal API (`IdentityClient`): caller membership (403), USER/TEAM targets in org (409).
@@ -221,7 +229,8 @@ Sprint 2: idempotency, DLT, broker-outage 503. Sprint 1: dedup, recovery, timeli
 | Gap | Where it is addressed |
 | --- | --- |
 | `ApiKey` (user/programmatic key) - only `IntegrationKey` built | Phase 1a deferred list |
-| Real JWT + Spring Security (still header-context stub) | later phase |
+| ~~Real JWT + Spring Security (header-context stub)~~ DONE: HS256 JWT across all services (`common-security`) + identity auth | Phase 7 tickets 2-3 |
+| JWT secret is a shared HS256 dev default in yaml; no rotation, no RS256/JWKS, no refresh-token rotation/revocation | later |
 | Redis cache for integration-key resolution + cross-service tenant checks (sync REST each call) | later |
 | RBAC beyond membership (role stored, not enforced per-action) | later |
 | Integration-key revoke/rotate endpoints (revoke on entity, not exposed) | later |
@@ -273,32 +282,52 @@ export JAVA_HOME=/usr/lib/jvm/java-21-openjdk
 ./gradlew :services:escalation-service:bootRun
 ./gradlew :services:notification-service:bootRun
 
-# 3. bootstrap a tenant + issue a key, then ingest with it
-OID=$(curl -s -XPOST localhost:8083/v1/organizations -H 'Content-Type: application/json' \
-  -d '{"name":"Acme","slug":"acme"}' | python3 -c 'import sys,json;print(json.load(sys.stdin)["id"])')
-UID=$(curl -s -XPOST localhost:8083/v1/users -H 'Content-Type: application/json' \
-  -d '{"email":"a@acme.io","displayName":"Alice"}' | python3 -c 'import sys,json;print(json.load(sys.stdin)["id"])')
-curl -s -XPOST localhost:8083/v1/organizations/$OID/memberships -H 'Content-Type: application/json' \
-  -d "{\"userId\":\"$UID\",\"role\":\"OWNER\"}"
-KEY=$(curl -s -XPOST localhost:8083/v1/organizations/$OID/integration-keys -H "X-User-Id: $UID" \
+# 3. register (real JWT now) -> token; create org + bootstrap membership; issue a key; ingest; read incidents.
+#    All user-facing calls go through the gateway (8080) with `Authorization: Bearer`. Ingest uses the key.
+ACC=$(curl -s -XPOST localhost:8080/v1/auth/register -H 'Content-Type: application/json' \
+  -d '{"email":"a@acme.io","displayName":"Alice","password":"supersecret1"}' \
+  | python3 -c 'import sys,json;print(json.load(sys.stdin)["accessToken"])')
+UID=$(curl -s localhost:8080/v1/auth/me -H "Authorization: Bearer $ACC" \
+  | python3 -c 'import sys,json;print(json.load(sys.stdin)["user"]["id"])')
+OID=$(curl -s -XPOST localhost:8080/v1/organizations -H "Authorization: Bearer $ACC" \
+  -H 'Content-Type: application/json' -d '{"name":"Acme","slug":"acme"}' \
+  | python3 -c 'import sys,json;print(json.load(sys.stdin)["id"])')
+curl -s -XPOST localhost:8080/v1/organizations/$OID/memberships -H "Authorization: Bearer $ACC" \
+  -H 'Content-Type: application/json' -d "{\"userId\":\"$UID\",\"role\":\"OWNER\"}"
+KEY=$(curl -s -XPOST localhost:8080/v1/organizations/$OID/integration-keys -H "Authorization: Bearer $ACC" \
   -H 'Content-Type: application/json' -d '{"name":"grafana-prod"}' | python3 -c 'import sys,json;print(json.load(sys.stdin)["key"])')
 
-curl -XPOST "localhost:8081/v1/integrations/$KEY/events/backend-critical" \
+# ingest (integration key auth, no JWT). Needs a service with routingKey=backend-critical for routing/policy.
+curl -XPOST "localhost:8080/v1/integrations/$KEY/events/backend-critical" \
   -H 'Content-Type: application/json' \
   -d '{"messageType":"CRITICAL","entityId":"payment-api-5xx","source":"grafana","severity":"CRITICAL"}'
 
-curl localhost:8082/v1/incidents
+# incident queries are tenant-scoped: pass organizationId + the Bearer token.
+curl "localhost:8080/v1/incidents?organizationId=$OID" -H "Authorization: Bearer $ACC"
 ```
+
+(Every service needs `heimcall.jwt.secret`; a shared dev default is baked into each `application.yml`,
+overridable via `HEIMCALL_JWT_SECRET`. The api-gateway also needs `HEIMCALL_UI_ORIGIN` for CORS, default
+`http://localhost:5173`.)
 
 ## 8. Next sprint
 
-Phases 1 + 3 + 4 + 5 + 6 complete; the trigger->notify loop is closed end to end (event -> alert ->
-incident -> escalation -> notification) and incidents have real lifecycle REST commands. Candidates:
-- **Phase 7 - UI** - ticket 1 done (notification.delivered/failed -> incident timeline). Next:
-  incident list/detail/timeline, ACK/resolve/cancel buttons, alert + occurrence view,
-  service/schedule/policy management, SSE/WebSocket updates. Phase 3 REST commands are in place.
-- **Phase 8 - Observability** - structured logging, correlation ids, Prometheus metrics, Kafka lag.
-- Cross-cutting hardening from the gaps table: real JWT + Spring Security, transactional outbox,
-  Redis caches/cooldown, `processed_event` TTL, `reassign` + `IncidentAssignment`.
+Phases 1 + 3 + 4 + 5 + 6 complete; the trigger->notify loop is closed end to end and incidents have
+real lifecycle REST commands. **Phase 7 in progress** (see plan ticket breakdown):
+- Ticket 1 DONE - notification.delivered/failed -> incident timeline (NOTIFIED/NOTIFY_FAILED).
+- Ticket 2 DONE - real JWT auth: `libs/common-security` + identity register/login/refresh/me.
+- Ticket 3 DONE - JWT propagated to all 6 services + gateway CORS + `/v1/auth` route.
+- Ticket 3.1 DONE - tenant-scoped incident queries + ERROR-dispatch security fix.
+- **Ticket 4 TODO** - SSE incident stream `GET /v1/incidents/stream` (per-org `SseEmitter` registry fed by
+  the `IncidentDomainEvents` listener; auth via `access_token` query param since EventSource can't set
+  headers). Plumbing reviewed: feed off `IncidentDomainEvents.{Triggered,Acknowledged,Resolved,Canceled}`
+  (in-process app events, also forwarded to Kafka by `IncidentEventPublisher` AFTER_COMMIT).
+- **Ticket 5 TODO** - React + Vite + TS UI in `web/`: login/register, incident list/detail/timeline,
+  ACK/resolve/cancel, SSE live updates.
 
-Decide at sprint start.
+Operational note: only incident-service is currently running the ERROR-dispatch `common-security` fix
+(ticket 3.1); rebuild+restart all services to propagate it (happy paths unaffected; only 4xx error bodies
+were masked as 401 on the others).
+
+Then **Phase 8 - Observability** and cross-cutting hardening (transactional outbox, Redis caches/cooldown,
+`processed_event` TTL, `reassign` + `IncidentAssignment`, JWT secret rotation/RS256).
