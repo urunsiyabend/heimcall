@@ -6,6 +6,14 @@ spring:
     name: api-gateway
   cloud:
     gateway:
+      # CORS for the browser UI. allow-credentials=true forbids "*" origin, so the dev origin is explicit.
+      globalcors:
+        cors-configurations:
+          '[/**]':
+            allowed-origins: ${HEIMCALL_UI_ORIGIN:http://localhost:5173}
+            allowed-methods: "*"
+            allowed-headers: "*"
+            allow-credentials: true
       routes:
         # More specific catalog/schedule routes must precede identity's /v1/organizations/** route.
         - id: service-catalog-service
@@ -28,7 +36,7 @@ spring:
         - id: identity-service
           uri: http://localhost:8083
           predicates:
-            - Path=/v1/organizations/**,/v1/users/**,/v1/integration-keys/**
+            - Path=/v1/auth/**,/v1/organizations/**,/v1/users/**,/v1/integration-keys/**
         - id: integration-service
           uri: http://localhost:8081
           predicates:
