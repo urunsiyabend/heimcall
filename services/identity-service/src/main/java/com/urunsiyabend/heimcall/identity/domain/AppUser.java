@@ -21,6 +21,9 @@ public class AppUser {
     @Column(name = "display_name", nullable = false)
     private String displayName;
 
+    @Column(name = "password_hash")
+    private String passwordHash;
+
     @Column(name = "created_at", nullable = false)
     private Instant createdAt;
 
@@ -36,8 +39,23 @@ public class AppUser {
         return u;
     }
 
+    /** Create a user with credentials (registration). {@code passwordHash} is already BCrypt-hashed. */
+    public static AppUser register(String email, String displayName, String passwordHash, Instant at) {
+        AppUser u = create(email, displayName, at);
+        u.passwordHash = passwordHash;
+        return u;
+    }
+
     public void rename(String displayName) {
         this.displayName = displayName;
+    }
+
+    public void setPasswordHash(String passwordHash) {
+        this.passwordHash = passwordHash;
+    }
+
+    public String getPasswordHash() {
+        return passwordHash;
     }
 
     public UUID getId() {

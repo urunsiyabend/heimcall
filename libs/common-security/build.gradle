@@ -1,0 +1,15 @@
+// Shared JWT auth: a Spring Boot auto-configuration that any service gets just by depending on this.
+// java-library so the security + jjwt API leak transitively (consumers issue/verify + get the filter chain).
+apply plugin: 'java-library'
+
+dependencies {
+    api 'org.springframework.boot:spring-boot-starter-security'
+    api 'org.springframework:spring-web'
+    api 'io.jsonwebtoken:jjwt-api:0.12.6'
+    runtimeOnly 'io.jsonwebtoken:jjwt-impl:0.12.6'
+    runtimeOnly 'io.jsonwebtoken:jjwt-jackson:0.12.6'
+
+    implementation 'org.springframework.boot:spring-boot-autoconfigure'
+    compileOnly 'jakarta.servlet:jakarta.servlet-api'
+    annotationProcessor 'org.springframework.boot:spring-boot-configuration-processor'
+}

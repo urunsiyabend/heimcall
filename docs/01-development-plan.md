@@ -767,10 +767,38 @@ Deliverables:
 - Escalation policy editor
 - WebSocket/SSE incident updates
 
+Decided 2026-06-09: real JWT auth (full), SSE realtime, React+Vite+TS UI in a new `web/` folder,
+gateway-routed. Sliced into tickets, each verified + reviewed before the next.
+
 Ticket 1 (done, 2026-06-09): notification feedback loop. incident-service now consumes
 `notification.delivered.v1`/`notification.failed.v1` and appends `NOTIFIED`/`NOTIFY_FAILED` timeline
 events (idempotent on event id, tenant-checked). Closes the trigger->notify->timeline loop so the UI
-incident detail can show notification outcomes. Next: incident list/detail/timeline + ACK/resolve/cancel UI MVP.
+incident detail can show notification outcomes.
+
+Ticket 2 - Auth backend + `libs/common-security`:
+- New `libs/common-security`: HS256 JWT (jjwt), shared secret via `heimcall.jwt.secret`. `JwtSupport`
+  (issue/verify), `JwtAuthenticationFilter` (validates `Authorization: Bearer`, sets principal, and
+  injects the verified userId as the `X-User-Id` header so existing controllers keep working but the
+  header is now derived from a validated signature, not client-trusted). Spring Boot auto-configuration
+  (`SecurityFilterChain`, stateless): permitAll `/actuator/**`, `POST /v1/auth/{login,register,refresh}`,
+  `/v1/internal/**`, `/v1/integration-keys/resolve`, `/v1/integrations/**`; anyRequest authenticated.
+- identity-service: `app_user.password_hash` (Flyway V2, BCrypt). `POST /v1/auth/register`,
+  `POST /v1/auth/login` -> `{accessToken, refreshToken, user}`, `POST /v1/auth/refresh`, `GET /v1/auth/me`
+  (user + memberships). Access token 60m, refresh 30d. identity is the first consumer of common-security
+  (its own user-facing endpoints become JWT-protected; `/v1/auth/*` + internal/resolve stay open).
+
+Ticket 3 - Propagate common-security to the other 5 services (catalog, schedule, integration,
+incident, escalation). Each adds the dependency + `heimcall.jwt.secret`; the filter derives `X-User-Id`
+from the JWT, so the ~13 `@RequestHeader("X-User-Id")` controllers are untouched. api-gateway adds CORS +
+forwards `Authorization`. `/v1/internal/**` and the integration ingest endpoint stay open.
+
+Ticket 4 - SSE incident stream: `GET /v1/incidents/stream` (per-org `SseEmitter` registry fed by the
+existing `@TransactionalEventListener`). Single-instance (multi-instance -> Redis pub/sub, deferred).
+SSE auth via access-token query param (EventSource cannot set headers).
+
+Ticket 5 - React UI MVP (`web/`): Vite + React + TS, hand-written typed fetch client. Login/register,
+access token in memory + refresh in httpOnly cookie, org selector from memberships. Incident list
+(status filter), detail (timeline + alerts + occurrences), ACK/resolve/cancel buttons, SSE live updates.
 
 Recommended frontend:
 
