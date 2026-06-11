@@ -2,7 +2,7 @@
 
 Living document. Update at the end of every sprint. Reflects what is actually built and running, not what is planned. Plan lives in `01-development-plan.md`; this file is the source of truth for "where are we now".
 
-Last updated: 2026-06-11 (Sprint 10 - Phase 8 T1: common-observability — JSON logs + correlation ids)
+Last updated: 2026-06-11 (Sprint 10 - Phase 8 T1+T2: JSON logs + correlation ids; Prometheus metrics + probes)
 
 ## 1. Snapshot
 
@@ -11,7 +11,7 @@ Last updated: 2026-06-11 (Sprint 10 - Phase 8 T1: common-observability — JSON 
 | Architecture | Microservices-first monorepo, Gradle multi-project |
 | Build | `./gradlew build` green on Java 21 |
 | Runtime verified | Sprint 9 Phase-7 tickets 1-3.1: full loop under real JWT through the gateway (register/login -> token -> CRUD across all services -> ingest -> incident TRIGGER + NOTIFIED), JWT enforced (401 no-token, refresh-as-access rejected, client X-User-Id spoof stripped), incident queries tenant-scoped (cross-org 403) |
-| Last sprint | Sprint 10 - Phase 8 T1 (common-observability: JSON logback + HTTP/Kafka correlation-id propagation, fleet-wide) |
+| Last sprint | Sprint 10 - Phase 8 T1+T2 (JSON logback + correlation ids fleet-wide; Prometheus metrics + domain meters + actuator probes) |
 | Tests | First automated test: `OnCallCalculatorTest` (rotation math) |
 | Auth | Real JWT (HS256, `libs/common-security`): identity issues access+refresh; every service validates Bearer and derives `X-User-Id` from the verified token. Header-context stub retired. |
 
@@ -210,6 +210,19 @@ Ports: api-gateway 8080, integration 8081, incident 8082, identity 8083, service
 - Producer interceptor wired on the services that publish: integration, incident, escalation, notification.
 - **Gateway**: reactive (WebFlux), so the servlet filter does not bind; it forwards client headers, so an
   upstream-supplied `X-Correlation-Id` still rides through. A reactive `WebFilter` is deferred.
+- **Metrics (Phase 8 T2)**: `micrometer-registry-prometheus` on every service via `common-observability`
+  (actuator already present). Each service exposes `/actuator/prometheus` + `/actuator/health` with
+  `liveness`/`readiness` probe groups. Micrometer auto-instruments JVM, HTTP, and the spring-kafka
+  listener/template timers.
+  - Domain meters (exact Prometheus names, registered at startup): incident-service
+    `incident_triggered_total`, `incident_acknowledged_total`, `incident_resolved_total` counters +
+    `incident_time_to_ack_seconds`, `incident_time_to_resolve_seconds` timers (`IncidentMetrics`,
+    AFTER_COMMIT off `IncidentDomainEvents`; trigger instant = incident `created_at`). notification-service
+    `notification_delivery_success_total` (delivered) / `notification_delivery_failure_total` (terminal
+    fail only, not retries). escalation-service `escalation_task_executed_total`.
+  - Verified: incident-service scrape exposes all 5 meters; `health/liveness` + `health/readiness` UP.
+  - Gap: native per-partition `kafka_consumer_lag` gauge not yet bound (only `spring_kafka_listener_*`
+    timers present); needs a `KafkaClientMetrics`/`MicrometerConsumerListener` binding — deferred to T3.
 
 ### Kafka topics in use
 - `alert.received.v1` (integration-service -> incident-service) + `alert.received.v1.DLT`
@@ -366,10 +379,11 @@ restart all services off fresh jars to propagate (happy paths unaffected either 
 **Phase 8 - Observability and Production Readiness** (in progress):
 - T1 DONE - `common-observability`: structured JSON logging + correlation ids across the fleet (HTTP->Kafka->log).
   Gateway reactive `WebFilter` deferred (servlet filter does not bind; client headers still forwarded).
-- Remaining deliverables (plan §Phase 8): OpenTelemetry traces, Prometheus metrics (incident_triggered/
-  acknowledged/resolved_total, time_to_ack/resolve_seconds, notification_delivery_success/failure_total,
-  escalation_task_executed_total, kafka_consumer_lag), Grafana dashboards, Kubernetes probes, HPA,
-  Kafka-lag / Redis / PostgreSQL dashboards, runbooks.
+- T2 DONE - Prometheus metrics + actuator probes: `/actuator/prometheus` + `health/{liveness,readiness}`
+  on every service; domain meters on incident/notification/escalation (see §4 Observability). Native
+  `kafka_consumer_lag` gauge deferred to T3.
+- Remaining deliverables (plan §Phase 8): OpenTelemetry traces, native Kafka consumer-lag gauge, Grafana
+  dashboards, Kubernetes probe wiring + HPA, Redis / PostgreSQL dashboards, runbooks.
 
 Plus cross-cutting hardening still open (transactional outbox, Redis caches/cooldown, `processed_event`
 TTL, `reassign` + `IncidentAssignment`, JWT secret rotation/RS256).

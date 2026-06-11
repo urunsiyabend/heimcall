@@ -837,6 +837,23 @@ escalation_task_executed_total
 kafka_consumer_lag
 ```
 
+### Ticket breakdown
+
+- **T1 (DONE)** - `common-observability`: structured JSON logging (logstash logback) + correlation-id
+  propagation across HTTP and Kafka (servlet filter + producer/record interceptors), fleet-wide. Gateway
+  reactive WebFilter deferred.
+- **T2 - Prometheus metrics + actuator probes.**
+  - Add `micrometer-registry-prometheus` to `common-observability` (api) so every service ships a registry;
+    actuator already present on all 8 services.
+  - Expose `prometheus` + `health` (with `liveness`/`readiness` probe groups) endpoints per service yml.
+  - Domain meters: incident-service `incident_triggered/acknowledged/resolved_total` counters +
+    `incident_time_to_ack/resolve_seconds` timers (trigger time = incident `created_at`); notification-service
+    `notification_delivery_success/failure_total`; escalation-service `escalation_task_executed_total`.
+  - `kafka_consumer_lag` + JVM/HTTP metrics come from Micrometer auto-instrumentation (no code).
+  - Verify: `/actuator/prometheus` scrape shows the domain meters move on a live trigger->ack->resolve.
+- **T3+ (later)** - OpenTelemetry traces, Grafana dashboards, Kubernetes probes wiring + HPA,
+  Kafka-lag / Redis / PostgreSQL dashboards, runbooks.
+
 ## 10. Suggested Repository Structure
 
 ```text
