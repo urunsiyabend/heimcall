@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { Link } from 'react-router-dom'
 import { useAuth } from '../auth/AuthContext'
 import { useIncidents } from '../hooks/useIncidents'
+import { useIncidentStream } from '../hooks/useIncidentStream'
 import { SeverityBadge, StatusBadge } from '../components/StatusBadge'
 import type { IncidentStatus } from '../api/types'
 
@@ -19,6 +20,10 @@ export function IncidentListPage() {
     activeOrgId,
     filter === 'ALL' ? undefined : filter,
   )
+
+  // Live updates: refetch on (re)connect (no replay) and on every lifecycle event. Reloading rather than
+  // patching in place keeps the status filter honest (a resolved incident leaves a TRIGGERED-filtered view).
+  useIncidentStream(activeOrgId, { onConnect: reload, onEvent: reload })
 
   if (memberships.length === 0) {
     return (
