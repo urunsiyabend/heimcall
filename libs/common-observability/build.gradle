@@ -8,6 +8,10 @@ dependencies {
     api 'net.logstash.logback:logstash-logback-encoder:7.4'
     api 'org.slf4j:slf4j-api'
 
+    // Prometheus scrape endpoint (Phase 8 T2). api so every consumer ships the registry; actuator
+    // is already on each service. Micrometer auto-instruments JVM, HTTP, and Kafka-consumer lag.
+    api 'io.micrometer:micrometer-registry-prometheus'
+
     implementation 'org.springframework.boot:spring-boot-autoconfigure'
     // HTTP correlation filter — servlet API only needed at compile time.
     compileOnly 'jakarta.servlet:jakarta.servlet-api'

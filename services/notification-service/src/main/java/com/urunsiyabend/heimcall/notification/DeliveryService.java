@@ -10,6 +10,8 @@ import com.urunsiyabend.heimcall.notification.domain.NotificationDeliveryReposit
 import com.urunsiyabend.heimcall.notification.domain.NotificationRequest;
 import com.urunsiyabend.heimcall.notification.domain.NotificationRequestRepository;
 import com.urunsiyabend.heimcall.notification.sender.NotificationSender;
+import io.micrometer.core.instrument.Counter;
+import io.micrometer.core.instrument.MeterRegistry;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
@@ -39,9 +41,13 @@ public class DeliveryService {
     private final Map<NotificationChannel, NotificationSender> senders = new EnumMap<>(NotificationChannel.class);
     private final int maxAttempts;
     private final long retryBackoffMs;
+    // Phase 8 T2: notification_delivery_success_total / notification_delivery_failure_total (terminal only).
+    private final Counter deliverySuccess;
+    private final Counter deliveryFailure;
 
     public DeliveryService(NotificationDeliveryRepository deliveries, NotificationRequestRepository requests,
                            KafkaTemplate<String, Object> eventsKafkaTemplate, List<NotificationSender> senderList,
+                           MeterRegistry registry,
                            @Value("${notification.delivery.max-attempts:3}") int maxAttempts,
                            @Value("${notification.delivery.retry-backoff-ms:10000}") long retryBackoffMs) {
         this.deliveries = deliveries;
@@ -50,6 +56,8 @@ public class DeliveryService {
         senderList.forEach(s -> senders.put(s.channel(), s));
         this.maxAttempts = maxAttempts;
         this.retryBackoffMs = retryBackoffMs;
+        this.deliverySuccess = registry.counter("notification.delivery.success");
+        this.deliveryFailure = registry.counter("notification.delivery.failure");
     }
 
     @Transactional
@@ -77,6 +85,7 @@ public class DeliveryService {
             sender.send(delivery, request);
             delivery.markDelivered(now);
             deliveries.save(delivery);
+            deliverySuccess.increment();
             eventsKafkaTemplate.send(Topics.NOTIFICATION_DELIVERED, delivery.getIncidentId().toString(),
                     new NotificationDeliveredEvent(UUID.randomUUID(), now, delivery.getOrganizationId(),
                             delivery.getIncidentId(), delivery.getRecipientUserId(), delivery.getChannel().name(),
@@ -103,6 +112,7 @@ public class DeliveryService {
     private void failAndPublish(NotificationDelivery delivery, String reason, Instant now) {
         delivery.markFailed(reason, now);
         deliveries.save(delivery);
+        deliveryFailure.increment();
         eventsKafkaTemplate.send(Topics.NOTIFICATION_FAILED, delivery.getIncidentId().toString(),
                 new NotificationFailedEvent(UUID.randomUUID(), now, delivery.getOrganizationId(),
                         delivery.getIncidentId(), delivery.getRecipientUserId(), delivery.getChannel().name(),

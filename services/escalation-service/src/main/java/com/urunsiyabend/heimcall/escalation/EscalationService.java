@@ -48,12 +48,15 @@ public class EscalationService {
     private final IdentityClient identity;
     private final ScheduleClient schedule;
     private final KafkaTemplate<String, Object> eventsKafkaTemplate;
+    // Phase 8 T2: escalation_task_executed_total.
+    private final io.micrometer.core.instrument.Counter taskExecuted;
 
     public EscalationService(EscalationPolicyRepository policies, EscalationRuleRepository rules,
                              EscalationRuleTargetRepository targets, EscalationTaskRepository tasks,
                              EscalationIncidentRepository incidents, ProcessedEventRepository processedEvents,
                              IdentityClient identity, ScheduleClient schedule,
-                             KafkaTemplate<String, Object> eventsKafkaTemplate) {
+                             KafkaTemplate<String, Object> eventsKafkaTemplate,
+                             io.micrometer.core.instrument.MeterRegistry registry) {
         this.policies = policies;
         this.rules = rules;
         this.targets = targets;
@@ -63,6 +66,7 @@ public class EscalationService {
         this.identity = identity;
         this.schedule = schedule;
         this.eventsKafkaTemplate = eventsKafkaTemplate;
+        this.taskExecuted = registry.counter("escalation.task.executed");
     }
 
     /** Materialize escalation tasks for a newly triggered incident. Idempotent on event id and incident. */
@@ -165,6 +169,7 @@ public class EscalationService {
         });
         task.markExecuted(now);
         tasks.save(task);
+        taskExecuted.increment();
         log.info("Fired escalation task {} (incident {} level {}) -> {} recipient(s)",
                 taskId, task.getIncidentId(), task.getLevel(), recipients.size());
     }
