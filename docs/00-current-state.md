@@ -2,7 +2,7 @@
 
 Living document. Update at the end of every sprint. Reflects what is actually built and running, not what is planned. Plan lives in `01-development-plan.md`; this file is the source of truth for "where are we now".
 
-Last updated: 2026-06-10 (Sprint 9 - Phase 7 tickets 1-3.1: notification feedback + real JWT auth)
+Last updated: 2026-06-11 (Sprint 10 - Phase 8 T1: common-observability — JSON logs + correlation ids)
 
 ## 1. Snapshot
 
@@ -11,7 +11,7 @@ Last updated: 2026-06-10 (Sprint 9 - Phase 7 tickets 1-3.1: notification feedbac
 | Architecture | Microservices-first monorepo, Gradle multi-project |
 | Build | `./gradlew build` green on Java 21 |
 | Runtime verified | Sprint 9 Phase-7 tickets 1-3.1: full loop under real JWT through the gateway (register/login -> token -> CRUD across all services -> ingest -> incident TRIGGER + NOTIFIED), JWT enforced (401 no-token, refresh-as-access rejected, client X-User-Id spoof stripped), incident queries tenant-scoped (cross-org 403) |
-| Last sprint | Sprint 9 - Phase 7 tickets 1-3.1 (notification->timeline, real JWT auth across all services + gateway, tenant-scoped incident queries) |
+| Last sprint | Sprint 10 - Phase 8 T1 (common-observability: JSON logback + HTTP/Kafka correlation-id propagation, fleet-wide) |
 | Tests | First automated test: `OnCallCalculatorTest` (rotation math) |
 | Auth | Real JWT (HS256, `libs/common-security`): identity issues access+refresh; every service validates Bearer and derives `X-User-Id` from the verified token. Header-context stub retired. |
 
@@ -31,6 +31,7 @@ libs/
   common-domain     enums: MessageType, Severity, IncidentStatus, AlertStatus
   common-events      event records (Alert*, Incident triggered/acknowledged/resolved/canceled, Notification*), Topics constants
   common-security    HS256 JWT auto-config: JwtSupport (issue/verify), JwtAuthenticationFilter (Bearer -> principal + derives X-User-Id), stateless SecurityFilterChain. Added by every service via one dependency.
+  common-observability  (Phase 8 T1) auto-config: logstash JSON logback, servlet CorrelationIdFilter (X-Correlation-Id in/out via MDC), Kafka CorrelationProducerInterceptor (stamps id on outbound records) + CorrelationRecordInterceptor (lifts id back into MDC on every listener). Added by every service via one dependency.
   test-support       Testcontainers singletons (PG + Kafka) - not yet used
 services/
   api-gateway        Spring Cloud Gateway, routes -> catalog 8084, schedule 8085, escalation 8086, identity 8083 (incl. /v1/auth/**), integration 8081, incident 8082; CORS for the UI origin; forwards Authorization (validation is per-service)
@@ -198,6 +199,18 @@ Ports: api-gateway 8080, integration 8081, incident 8082, identity 8083, service
   operationally visible.
 - Resilience: `ErrorHandlingDeserializer` + bounded retry + DLT (mirrors incident-service Phase 3.5).
 
+### Observability (Phase 8 T1, cross-cutting)
+- `libs/common-observability` on every service (gateway, identity, catalog, schedule, integration,
+  incident, escalation, notification) via one dependency + auto-config.
+- **Structured logging**: logstash JSON logback (`logback-spring.xml`), MDC fields rendered into each line.
+- **Correlation ids**: `CorrelationIdFilter` (servlet) reads/sets `X-Correlation-Id` (mints one if absent),
+  puts it in the MDC and echoes it on the response. `CorrelationProducerInterceptor` stamps the id onto
+  outbound Kafka records; `CorrelationRecordInterceptor` (on every listener container factory) lifts it
+  back into the MDC on consume. Verified id propagates HTTP -> Kafka -> log end to end.
+- Producer interceptor wired on the services that publish: integration, incident, escalation, notification.
+- **Gateway**: reactive (WebFlux), so the servlet filter does not bind; it forwards client headers, so an
+  upstream-supplied `X-Correlation-Id` still rides through. A reactive `WebFilter` is deferred.
+
 ### Kafka topics in use
 - `alert.received.v1` (integration-service -> incident-service) + `alert.received.v1.DLT`
 - `incident.triggered.v1` / `incident.acknowledged.v1` / `incident.resolved.v1` / `incident.canceled.v1` (incident-service -> escalation-service)
@@ -350,5 +363,13 @@ Operational note: the `common-security` lib carries two recent changes — the t
 and the ticket 4 stream-path-scoped `access_token` query param. Both ship to every service on rebuild;
 restart all services off fresh jars to propagate (happy paths unaffected either way).
 
-Then **Phase 8 - Observability** and cross-cutting hardening (transactional outbox, Redis caches/cooldown,
-`processed_event` TTL, `reassign` + `IncidentAssignment`, JWT secret rotation/RS256).
+**Phase 8 - Observability and Production Readiness** (in progress):
+- T1 DONE - `common-observability`: structured JSON logging + correlation ids across the fleet (HTTP->Kafka->log).
+  Gateway reactive `WebFilter` deferred (servlet filter does not bind; client headers still forwarded).
+- Remaining deliverables (plan §Phase 8): OpenTelemetry traces, Prometheus metrics (incident_triggered/
+  acknowledged/resolved_total, time_to_ack/resolve_seconds, notification_delivery_success/failure_total,
+  escalation_task_executed_total, kafka_consumer_lag), Grafana dashboards, Kubernetes probes, HPA,
+  Kafka-lag / Redis / PostgreSQL dashboards, runbooks.
+
+Plus cross-cutting hardening still open (transactional outbox, Redis caches/cooldown, `processed_event`
+TTL, `reassign` + `IncidentAssignment`, JWT secret rotation/RS256).
