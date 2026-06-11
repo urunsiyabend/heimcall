@@ -25,6 +25,11 @@ import java.util.UUID;
  *
  * <p>A client-supplied {@code X-User-Id} is always overwritten (with the token subject, or removed
  * when there is no valid token) so it can never be spoofed.
+ *
+ * <p>The token is read from {@code Authorization: Bearer}. As a narrow fallback — only on the SSE stream
+ * endpoint, where a browser {@code EventSource} cannot set request headers — it is also accepted from the
+ * {@code access_token} query parameter. The fallback is path-scoped so URL-borne tokens are not honored
+ * elsewhere.
  */
 public class JwtAuthenticationFilter extends OncePerRequestFilter {
 
@@ -40,10 +45,10 @@ public class JwtAuthenticationFilter extends OncePerRequestFilter {
     protected void doFilterInternal(HttpServletRequest request, HttpServletResponse response, FilterChain chain)
             throws ServletException, IOException {
         String verifiedUserId = null;
-        String header = request.getHeader("Authorization");
-        if (header != null && header.startsWith("Bearer ")) {
+        String token = bearerToken(request);
+        if (token != null) {
             try {
-                Claims claims = jwt.parse(header.substring(7));
+                Claims claims = jwt.parse(token);
                 if (JwtSupport.TYPE_ACCESS.equals(claims.get("type", String.class))) {
                     UUID userId = UUID.fromString(claims.getSubject());
                     AuthPrincipal principal = new AuthPrincipal(
@@ -59,6 +64,22 @@ public class JwtAuthenticationFilter extends OncePerRequestFilter {
             }
         }
         chain.doFilter(new UserIdHeaderRequest(request, verifiedUserId), response);
+    }
+
+    /**
+     * Bearer header if present, else — only for the SSE stream endpoint — the {@code access_token} query
+     * param. The query-param fallback is path-scoped on purpose: a token in the URL leaks via access logs,
+     * browser history, and {@code Referer}, so it is accepted only where {@code EventSource} forces it.
+     */
+    private static String bearerToken(HttpServletRequest request) {
+        String header = request.getHeader("Authorization");
+        if (header != null && header.startsWith("Bearer ")) {
+            return header.substring(7);
+        }
+        if (request.getRequestURI().endsWith("/incidents/stream")) {
+            return request.getParameter("access_token");
+        }
+        return null;
     }
 
     /** Forces {@code X-User-Id} to the verified value (or hides it entirely when {@code null}). */
