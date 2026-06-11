@@ -128,3 +128,92 @@ button:disabled {
   border-radius: 12px;
   padding: 1.5rem;
 }
+
+/* Incident list */
+.list-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  margin-bottom: 1rem;
+  flex-wrap: wrap;
+}
+.filters {
+  display: flex;
+  gap: 0.4rem;
+  flex-wrap: wrap;
+}
+.chip {
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--muted);
+  padding: 0.35rem 0.7rem;
+  font-size: 0.8rem;
+  border-radius: 999px;
+}
+.chip.active {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+table.grid {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.9rem;
+}
+table.grid th {
+  text-align: left;
+  color: var(--muted);
+  font-weight: 500;
+  padding: 0.5rem 0.7rem;
+  border-bottom: 1px solid var(--border);
+}
+table.grid td {
+  padding: 0.6rem 0.7rem;
+  border-bottom: 1px solid var(--border);
+}
+table.grid a {
+  color: var(--accent);
+  text-decoration: none;
+}
+.badge {
+  display: inline-block;
+  padding: 0.15rem 0.5rem;
+  border-radius: 6px;
+  font-size: 0.72rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+.status-triggered {
+  background: #4a1d1d;
+  color: #ff9b9b;
+}
+.status-acknowledged {
+  background: #4a3d1d;
+  color: #ffd98b;
+}
+.status-resolved {
+  background: #1d4a2b;
+  color: #8bffae;
+}
+.status-canceled {
+  background: #2a2f3a;
+  color: var(--muted);
+}
+.sev-critical {
+  background: #4a1d1d;
+  color: #ff9b9b;
+}
+.sev-high {
+  background: #4a331d;
+  color: #ffc28b;
+}
+.sev-medium {
+  background: #4a4a1d;
+  color: #f2ff8b;
+}
+.sev-low,
+.sev-info {
+  background: #2a2f3a;
+  color: var(--muted);
+}

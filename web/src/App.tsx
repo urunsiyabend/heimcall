@@ -4,7 +4,7 @@ import { AppLayout } from './components/AppLayout'
 import { LoginPage } from './pages/LoginPage'
 import { RegisterPage } from './pages/RegisterPage'
 import { CreateOrgPage } from './pages/CreateOrgPage'
-import { DashboardPage } from './pages/DashboardPage'
+import { IncidentListPage } from './pages/IncidentListPage'
 import type { ReactNode } from 'react'
 
 function RequireAuth({ children }: { children: ReactNode }) {
@@ -49,7 +49,7 @@ export function App() {
               </RequireAuth>
             }
           >
-            <Route path="/" element={<DashboardPage />} />
+            <Route path="/" element={<IncidentListPage />} />
             <Route path="/orgs/new" element={<CreateOrgPage />} />
           </Route>
           <Route path="*" element={<Navigate to="/" replace />} />
