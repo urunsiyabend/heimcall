@@ -4,6 +4,7 @@ import { getAlerts, getIncident, getTimeline } from '../api/incidents'
 import { ApiError } from '../api/client'
 import { SeverityBadge, StatusBadge } from '../components/StatusBadge'
 import { AlertOccurrences } from '../components/AlertOccurrences'
+import { IncidentActions } from '../components/IncidentActions'
 import type { Alert, Incident, TimelineEvent } from '../api/types'
 
 function fmt(ts: string): string {
@@ -56,6 +57,8 @@ export function IncidentDetailPage() {
           <StatusBadge status={incident.status} />
         </div>
       </div>
+
+      <IncidentActions incidentId={incident.id} status={incident.status} onChanged={load} />
 
       <dl className="meta-grid">
         <dt>Source</dt>

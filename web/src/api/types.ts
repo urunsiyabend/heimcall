@@ -30,7 +30,7 @@ export interface Organization {
 }
 
 export type IncidentStatus = 'TRIGGERED' | 'ACKNOWLEDGED' | 'RESOLVED' | 'CANCELED'
-export type Severity = 'CRITICAL' | 'HIGH' | 'MEDIUM' | 'LOW' | 'INFO'
+export type Severity = 'CRITICAL' | 'WARNING' | 'INFO'
 
 export interface Incident {
   id: string

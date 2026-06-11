@@ -14,3 +14,9 @@ export const getTimeline = (id: string) => api.get<TimelineEvent[]>(`/v1/inciden
 export const getAlerts = (id: string) => api.get<Alert[]>(`/v1/incidents/${id}/alerts`)
 export const getOccurrences = (id: string, alertId: string) =>
   api.get<AlertOccurrence[]>(`/v1/incidents/${id}/alerts/${alertId}/occurrences`)
+
+// Lifecycle commands (idempotent on the backend; safe to retry). Caller identity comes from the JWT
+// (the gateway/common-security inject X-User-Id from the verified token).
+export type IncidentAction = 'acknowledge' | 'resolve' | 'cancel'
+export const actOnIncident = (id: string, action: IncidentAction) =>
+  api.post<void>(`/v1/incidents/${id}/${action}`)
