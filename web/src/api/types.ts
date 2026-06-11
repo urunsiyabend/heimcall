@@ -48,3 +48,40 @@ export interface Incident {
   updatedAt: string
   lastEventAt: string
 }
+
+export interface TimelineEvent {
+  id: string
+  incidentId: string
+  type: string
+  message: string | null
+  createdAt: string
+}
+
+export type AlertStatus = 'TRIGGERED' | 'ACKNOWLEDGED' | 'RESOLVED'
+
+export interface Alert {
+  id: string
+  organizationId: string
+  incidentId: string
+  source: string
+  dedupKey: string
+  externalEntityId: string
+  status: AlertStatus
+  severity: Severity
+  title: string
+  occurrenceCount: number
+  firstSeenAt: string
+  lastSeenAt: string
+}
+
+export interface AlertOccurrence {
+  id: string
+  alertId: string
+  eventId: string
+  messageType: string
+  severity: Severity
+  title: string | null
+  description: string | null
+  occurredAt: string | null
+  receivedAt: string
+}

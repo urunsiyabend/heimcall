@@ -217,3 +217,85 @@ table.grid a {
   background: #2a2f3a;
   color: var(--muted);
 }
+
+/* Detail */
+.detail {
+  max-width: 820px;
+}
+.detail-head {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  margin: 0.5rem 0 0.25rem;
+}
+.detail-head h2 {
+  margin: 0;
+}
+.badges {
+  display: flex;
+  gap: 0.4rem;
+}
+.meta-grid {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 0.3rem 1rem;
+  margin: 1rem 0;
+  font-size: 0.9rem;
+}
+.meta-grid dt {
+  color: var(--muted);
+}
+.meta-grid dd {
+  margin: 0;
+}
+.detail section {
+  margin-top: 1.5rem;
+}
+.detail h3 {
+  font-size: 1rem;
+  border-bottom: 1px solid var(--border);
+  padding-bottom: 0.4rem;
+}
+.timeline {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
+.timeline li {
+  display: flex;
+  align-items: center;
+  gap: 0.7rem;
+  padding: 0.45rem 0;
+  border-bottom: 1px solid var(--border);
+  font-size: 0.9rem;
+}
+.timeline li .hint {
+  margin-left: auto;
+}
+.alert-card {
+  background: #0f1217;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 0.8rem;
+  margin-bottom: 0.7rem;
+}
+.alert-head {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+}
+.occurrences {
+  margin-top: 0.5rem;
+}
+.occ-body {
+  margin-top: 0.4rem;
+  padding-left: 0.6rem;
+  border-left: 2px solid var(--border);
+}
+.occ-row {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  padding: 0.3rem 0;
+  font-size: 0.85rem;
+}
