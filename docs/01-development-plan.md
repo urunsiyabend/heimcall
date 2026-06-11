@@ -842,17 +842,21 @@ kafka_consumer_lag
 - **T1 (DONE)** - `common-observability`: structured JSON logging (logstash logback) + correlation-id
   propagation across HTTP and Kafka (servlet filter + producer/record interceptors), fleet-wide. Gateway
   reactive WebFilter deferred.
-- **T2 - Prometheus metrics + actuator probes.**
-  - Add `micrometer-registry-prometheus` to `common-observability` (api) so every service ships a registry;
-    actuator already present on all 8 services.
-  - Expose `prometheus` + `health` (with `liveness`/`readiness` probe groups) endpoints per service yml.
+- **T2 (DONE)** - Prometheus metrics + actuator probes.
+  - `micrometer-registry-prometheus` added to `common-observability` (api); actuator already on all 8 services.
+  - `prometheus` + `health` (with `liveness`/`readiness` probe groups) exposed per service yml.
   - Domain meters: incident-service `incident_triggered/acknowledged/resolved_total` counters +
     `incident_time_to_ack/resolve_seconds` timers (trigger time = incident `created_at`); notification-service
     `notification_delivery_success/failure_total`; escalation-service `escalation_task_executed_total`.
-  - `kafka_consumer_lag` + JVM/HTTP metrics come from Micrometer auto-instrumentation (no code).
-  - Verify: `/actuator/prometheus` scrape shows the domain meters move on a live trigger->ack->resolve.
-- **T3+ (later)** - OpenTelemetry traces, Grafana dashboards, Kubernetes probes wiring + HPA,
-  Kafka-lag / Redis / PostgreSQL dashboards, runbooks.
+  - JVM/HTTP metrics come from Micrometer auto-instrumentation (no code).
+- **T3 (DONE)** - native Kafka client metrics (consumer lag). `kafka_consumer_lag` does **not** come free:
+  Boot binds its `MicrometerConsumerListener` only to the consumer factory it auto-creates, and it can't even
+  autowire a service's `ConsumerFactory<String,Object>` (invariant generics) so the main listener runs on a
+  hidden non-bean fallback factory. Fixed in `common-observability` by attaching Micrometer consumer/producer
+  listeners through the `ConcurrentKafkaListenerContainerFactory` beans after singletons exist. Verified
+  `kafka_consumer_fetch_manager_records_lag_max` exported for every consumer incl. the primary one.
+- **T4+ (later)** - OpenTelemetry traces, Grafana dashboards, Kubernetes probes wiring + HPA,
+  Redis / PostgreSQL dashboards, runbooks.
 
 ## 10. Suggested Repository Structure
 

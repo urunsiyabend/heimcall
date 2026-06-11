@@ -2,7 +2,7 @@
 
 Living document. Update at the end of every sprint. Reflects what is actually built and running, not what is planned. Plan lives in `01-development-plan.md`; this file is the source of truth for "where are we now".
 
-Last updated: 2026-06-11 (Sprint 10 - Phase 8 T1+T2: JSON logs + correlation ids; Prometheus metrics + probes)
+Last updated: 2026-06-11 (Sprint 10 - Phase 8 T1-T3: JSON logs + correlation ids; Prometheus metrics + probes; Kafka consumer-lag)
 
 ## 1. Snapshot
 
@@ -221,8 +221,15 @@ Ports: api-gateway 8080, integration 8081, incident 8082, identity 8083, service
     `notification_delivery_success_total` (delivered) / `notification_delivery_failure_total` (terminal
     fail only, not retries). escalation-service `escalation_task_executed_total`.
   - Verified: incident-service scrape exposes all 5 meters; `health/liveness` + `health/readiness` UP.
-  - Gap: native per-partition `kafka_consumer_lag` gauge not yet bound (only `spring_kafka_listener_*`
-    timers present); needs a `KafkaClientMetrics`/`MicrometerConsumerListener` binding — deferred to T3.
+- **Native Kafka client metrics (Phase 8 T3)**: `common-observability` attaches a `MicrometerConsumerListener`
+  / `MicrometerProducerListener` to every Kafka factory after singletons exist (registry ready) and before
+  containers start. Reached **through the `ConcurrentKafkaListenerContainerFactory` beans**, not by type:
+  Boot can't autowire a service's `ConsumerFactory<String,Object>` into its default container factory (its
+  provider is invariant `ConsumerFactory<Object,Object>`), so it builds a private, non-bean fallback consumer
+  factory from yaml for the main listener — invisible to `getBeansOfType`. Skip-if-already-bound avoids a
+  double bind. Result: `kafka_consumer_fetch_manager_records_lag_max` + the full `kafka_consumer_*` family
+  exported for every consumer (verified incl. the primary `alert-received` consumer). Producer client metrics
+  bind on first publish (listener attached to the producer-factory beans).
 
 ### Kafka topics in use
 - `alert.received.v1` (integration-service -> incident-service) + `alert.received.v1.DLT`
@@ -380,10 +387,11 @@ restart all services off fresh jars to propagate (happy paths unaffected either 
 - T1 DONE - `common-observability`: structured JSON logging + correlation ids across the fleet (HTTP->Kafka->log).
   Gateway reactive `WebFilter` deferred (servlet filter does not bind; client headers still forwarded).
 - T2 DONE - Prometheus metrics + actuator probes: `/actuator/prometheus` + `health/{liveness,readiness}`
-  on every service; domain meters on incident/notification/escalation (see §4 Observability). Native
-  `kafka_consumer_lag` gauge deferred to T3.
-- Remaining deliverables (plan §Phase 8): OpenTelemetry traces, native Kafka consumer-lag gauge, Grafana
-  dashboards, Kubernetes probe wiring + HPA, Redis / PostgreSQL dashboards, runbooks.
+  on every service; domain meters on incident/notification/escalation (see §4 Observability).
+- T3 DONE - native Kafka client metrics (consumer lag) fleet-wide via container-factory-reached Micrometer
+  listeners (see §4 Observability).
+- Remaining deliverables (plan §Phase 8): OpenTelemetry traces, Grafana dashboards, Kubernetes probe
+  wiring + HPA, Redis / PostgreSQL dashboards, runbooks.
 
 Plus cross-cutting hardening still open (transactional outbox, Redis caches/cooldown, `processed_event`
 TTL, `reassign` + `IncidentAssignment`, JWT secret rotation/RS256).
