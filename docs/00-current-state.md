@@ -316,8 +316,9 @@ overridable via `HEIMCALL_JWT_SECRET`. The api-gateway also needs `HEIMCALL_UI_O
 
 ## 8. Next sprint
 
-Phases 1 + 3 + 4 + 5 + 6 complete; the trigger->notify loop is closed end to end and incidents have
-real lifecycle REST commands. **Phase 7 in progress** (see plan ticket breakdown):
+Phases 1 + 3 + 4 + 5 + 6 + 7 complete; the trigger->notify loop is closed end to end, incidents have
+real lifecycle REST commands, and a React UI (`web/`) drives auth + incident triage with live SSE
+updates. **Phase 7 done** (see plan ticket breakdown):
 - Ticket 1 DONE - notification.delivered/failed -> incident timeline (NOTIFIED/NOTIFY_FAILED).
 - Ticket 2 DONE - real JWT auth: `libs/common-security` + identity register/login/refresh/me.
 - Ticket 3 DONE - JWT propagated to all 6 services + gateway CORS + `/v1/auth` route.
@@ -331,10 +332,19 @@ real lifecycle REST commands. **Phase 7 in progress** (see plan ticket breakdown
   exposure. Verified end-to-end (ingest->TRIGGERED, ACK, resolve all streamed; query-param 401 off-path).
   Known gaps (deferred): emitters are in this JVM's heap so a multi-replica deploy needs a Redis fan-out;
   `send` runs synchronously on the commit/heartbeat thread so a slow client can block it (Phase 8).
-- **Ticket 5 TODO** - React + Vite + TS UI in `web/`: login/register, incident list/detail/timeline,
-  ACK/resolve/cancel, SSE live updates. **The stream carries no replay/`Last-Event-ID`**, so the client
-  must refetch the full incident list on every (re)open of the `EventSource`, not just patch per-event —
-  state changes during a disconnect gap are otherwise lost.
+- Ticket 5 DONE - React + Vite + TS UI in `web/` (hand-written typed fetch client, no framework state lib).
+  Login/register, access token in memory + refresh token in `localStorage` with on-load silent refresh and
+  a single-flight 401->refresh->retry interceptor. `/me`-driven org selector + minimal create-org (POST org
+  -> bootstrap self OWNER). Incident list with status filter, detail (timeline + alerts + lazy per-alert
+  occurrences), status-aware ACK/resolve/cancel. SSE live updates via `EventSource` (access token in the
+  `access_token` query param) — refetches the full list on (re)connect AND on every event (reload, not
+  in-place patch, so the status filter stays honest; no `Last-Event-ID` replay). Dev server :5173, all calls
+  through the gateway (`VITE_API_BASE`). Verified end-to-end against the running fleet incl. live SSE.
+  Known gaps (deferred): refresh token in `localStorage` is XSS-readable — proper fix is an httpOnly
+  `Set-Cookie` (backend sub-ticket); the `EventSource` keeps a stale access token if it expires mid-stream
+  (no token-refresh reconnect) — manual reload re-auths.
+
+Phase 7 complete (tickets 1-5). Note: `web/tasks/` (agent planning scaffolding) is git-excluded, not committed.
 
 Operational note: the `common-security` lib carries two recent changes — the ticket 3.1 ERROR-dispatch fix
 and the ticket 4 stream-path-scoped `access_token` query param. Both ship to every service on rebuild;

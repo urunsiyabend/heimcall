@@ -798,15 +798,13 @@ Single-instance (multi-instance -> Redis pub/sub, deferred); synchronous `send` 
 (slow-client blocking, deferred to Phase 8). SSE auth via access-token query param, honored only on the
 stream path (EventSource cannot set headers). Verified end-to-end.
 
-Ticket 5 - React UI MVP (`web/`): Vite + React + TS, hand-written typed fetch client. Login/register,
-access token in memory + refresh in httpOnly cookie, org selector from memberships. Incident list
-(status filter), detail (timeline + alerts + occurrences), ACK/resolve/cancel buttons, SSE live updates.
-
-Recommended frontend:
-
-- React + Vite
-- TypeScript
-- OpenAPI-generated client
+Ticket 5 (done, 2026-06-11): React UI MVP (`web/`), Vite + React 18 + TS, hand-written typed fetch client.
+Login/register, access token in memory + refresh token in `localStorage` (httpOnly cookie deferred to a
+backend sub-ticket), `/me`-driven org selector + minimal create-org. Incident list (status filter), detail
+(timeline + alerts + lazy occurrences), status-aware ACK/resolve/cancel, SSE live updates (EventSource +
+access_token query param, full-list refetch on connect/event). Shipped in 6 vertical slices, each verified
+against the running fleet. Note: OpenAPI-generated client was not used (services publish no OpenAPI spec) —
+the typed client is hand-written, as the ticket text specified.
 
 ## Phase 8 - Observability and Production Readiness
 
