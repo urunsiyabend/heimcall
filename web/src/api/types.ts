@@ -1,0 +1,50 @@
+// Hand-written types mirroring the gateway contracts (verified against service source).
+
+export interface User {
+  id: string
+  email: string
+  displayName: string
+}
+
+export interface Membership {
+  organizationId: string
+  organizationName: string
+  role: string
+}
+
+export interface TokenResponse {
+  accessToken: string
+  refreshToken: string
+  user: User
+}
+
+export interface MeResponse {
+  user: User
+  memberships: Membership[]
+}
+
+export interface Organization {
+  id: string
+  name: string
+  slug: string
+}
+
+export type IncidentStatus = 'TRIGGERED' | 'ACKNOWLEDGED' | 'RESOLVED' | 'CANCELED'
+export type Severity = 'CRITICAL' | 'HIGH' | 'MEDIUM' | 'LOW' | 'INFO'
+
+export interface Incident {
+  id: string
+  organizationId: string
+  source: string
+  dedupKey: string
+  title: string
+  description: string | null
+  severity: Severity
+  status: IncidentStatus
+  routingKey: string | null
+  serviceId: string | null
+  escalationPolicyId: string | null
+  createdAt: string
+  updatedAt: string
+  lastEventAt: string
+}
