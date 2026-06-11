@@ -155,6 +155,10 @@ Ports: api-gateway 8080, integration 8081, incident 8082, identity 8083, service
   org-filtered), `GET /v1/incidents/{id}`, `.../timeline`, `.../alerts`, `.../alerts/{alertId}/occurrences`
   - each per-incident read derives the org from the incident and enforces caller membership: 404 if absent,
     403 if not a member (closes the prior gap where queries returned incidents across all tenants).
+- Live stream (Phase 7 ticket 4): `GET /v1/incidents/stream?organizationId=` (`text/event-stream`,
+  member-gated). Per-org in-heap `SseEmitter` registry fed AFTER_COMMIT off `IncidentDomainEvents`; one
+  `incident` event `{incidentId,status,at}` per TRIGGER/ACK/RESOLVE/CANCEL + a 20s `:ping` heartbeat.
+  Auth via `access_token` query param (EventSource limitation), honored only on this path.
 
 ### escalation-service (port 8086)
 - Tenant rules via identity internal API (`IdentityClient`): caller membership (403), USER/TEAM targets in org (409).
@@ -318,16 +322,23 @@ real lifecycle REST commands. **Phase 7 in progress** (see plan ticket breakdown
 - Ticket 2 DONE - real JWT auth: `libs/common-security` + identity register/login/refresh/me.
 - Ticket 3 DONE - JWT propagated to all 6 services + gateway CORS + `/v1/auth` route.
 - Ticket 3.1 DONE - tenant-scoped incident queries + ERROR-dispatch security fix.
-- **Ticket 4 TODO** - SSE incident stream `GET /v1/incidents/stream` (per-org `SseEmitter` registry fed by
-  the `IncidentDomainEvents` listener; auth via `access_token` query param since EventSource can't set
-  headers). Plumbing reviewed: feed off `IncidentDomainEvents.{Triggered,Acknowledged,Resolved,Canceled}`
-  (in-process app events, also forwarded to Kafka by `IncidentEventPublisher` AFTER_COMMIT).
+- Ticket 4 DONE - SSE incident stream `GET /v1/incidents/stream`. Per-org in-heap `SseEmitter` registry
+  (`IncidentStreamRegistry`) fed by `IncidentStreamPublisher` off `IncidentDomainEvents.{Triggered,
+  Acknowledged,Resolved,Canceled}` AFTER_COMMIT (mirrors `IncidentEventPublisher`'s Kafka path, no ghost
+  updates on rollback). Member-gated like the queries; emits `{incidentId,status,at}` + a 20s `:ping`
+  heartbeat. Auth via `access_token` query param (EventSource can't set headers) — `common-security`
+  accepts the query-param token **only on the stream path**, rejected elsewhere to limit URL-borne token
+  exposure. Verified end-to-end (ingest->TRIGGERED, ACK, resolve all streamed; query-param 401 off-path).
+  Known gaps (deferred): emitters are in this JVM's heap so a multi-replica deploy needs a Redis fan-out;
+  `send` runs synchronously on the commit/heartbeat thread so a slow client can block it (Phase 8).
 - **Ticket 5 TODO** - React + Vite + TS UI in `web/`: login/register, incident list/detail/timeline,
-  ACK/resolve/cancel, SSE live updates.
+  ACK/resolve/cancel, SSE live updates. **The stream carries no replay/`Last-Event-ID`**, so the client
+  must refetch the full incident list on every (re)open of the `EventSource`, not just patch per-event —
+  state changes during a disconnect gap are otherwise lost.
 
-Operational note: only incident-service is currently running the ERROR-dispatch `common-security` fix
-(ticket 3.1); rebuild+restart all services to propagate it (happy paths unaffected; only 4xx error bodies
-were masked as 401 on the others).
+Operational note: the `common-security` lib carries two recent changes — the ticket 3.1 ERROR-dispatch fix
+and the ticket 4 stream-path-scoped `access_token` query param. Both ship to every service on rebuild;
+restart all services off fresh jars to propagate (happy paths unaffected either way).
 
 Then **Phase 8 - Observability** and cross-cutting hardening (transactional outbox, Redis caches/cooldown,
 `processed_event` TTL, `reassign` + `IncidentAssignment`, JWT secret rotation/RS256).

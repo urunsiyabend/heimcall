@@ -792,9 +792,11 @@ incident, escalation). Each adds the dependency + `heimcall.jwt.secret`; the fil
 from the JWT, so the ~13 `@RequestHeader("X-User-Id")` controllers are untouched. api-gateway adds CORS +
 forwards `Authorization`. `/v1/internal/**` and the integration ingest endpoint stay open.
 
-Ticket 4 - SSE incident stream: `GET /v1/incidents/stream` (per-org `SseEmitter` registry fed by the
-existing `@TransactionalEventListener`). Single-instance (multi-instance -> Redis pub/sub, deferred).
-SSE auth via access-token query param (EventSource cannot set headers).
+Ticket 4 (done, 2026-06-11): SSE incident stream `GET /v1/incidents/stream` (per-org `SseEmitter` registry
+fed by an AFTER_COMMIT `@TransactionalEventListener` off `IncidentDomainEvents`, + 20s heartbeat).
+Single-instance (multi-instance -> Redis pub/sub, deferred); synchronous `send` on the commit thread
+(slow-client blocking, deferred to Phase 8). SSE auth via access-token query param, honored only on the
+stream path (EventSource cannot set headers). Verified end-to-end.
 
 Ticket 5 - React UI MVP (`web/`): Vite + React + TS, hand-written typed fetch client. Login/register,
 access token in memory + refresh in httpOnly cookie, org selector from memberships. Incident list
