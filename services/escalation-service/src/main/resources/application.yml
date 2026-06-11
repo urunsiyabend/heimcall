@@ -28,6 +28,10 @@ spring:
         spring.deserializer.value.delegate.class: org.springframework.kafka.support.serializer.JsonDeserializer
         spring.json.trusted.packages: "com.urunsiyabend.heimcall.common.events,com.urunsiyabend.heimcall.common.domain"
         spring.json.use.type.headers: true
+    producer:
+      properties:
+        # Propagate the correlation id onto outbound notification.requested events.
+        interceptor.classes: com.urunsiyabend.heimcall.common.observability.CorrelationProducerInterceptor
 
 identity:
   base-url: ${IDENTITY_BASE_URL:http://localhost:8083}
