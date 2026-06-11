@@ -29,6 +29,10 @@ spring:
         spring.json.trusted.packages: "com.urunsiyabend.heimcall.common.events,com.urunsiyabend.heimcall.common.domain"
         spring.json.value.default.type: com.urunsiyabend.heimcall.common.events.AlertReceivedEvent
         spring.json.use.type.headers: false
+    producer:
+      properties:
+        # Propagate the correlation id onto outbound incident lifecycle events.
+        interceptor.classes: com.urunsiyabend.heimcall.common.observability.CorrelationProducerInterceptor
 
 catalog:
   base-url: ${CATALOG_BASE_URL:http://localhost:8084}

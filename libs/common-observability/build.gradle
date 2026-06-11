@@ -1,0 +1,19 @@
+// Shared observability: structured JSON logging + correlation-id propagation across HTTP and Kafka.
+// Auto-configures by being on the classpath (mirrors common-security). java-library so the logback
+// encoder and the servlet/kafka hooks leak transitively to consumers.
+apply plugin: 'java-library'
+
+dependencies {
+    // Structured JSON logs (Spring Boot 3.3 has no native structured logging; 3.4+ does).
+    api 'net.logstash.logback:logstash-logback-encoder:7.4'
+    api 'org.slf4j:slf4j-api'
+
+    implementation 'org.springframework.boot:spring-boot-autoconfigure'
+    // HTTP correlation filter — servlet API only needed at compile time.
+    compileOnly 'jakarta.servlet:jakarta.servlet-api'
+    compileOnly 'org.springframework:spring-web'
+    // Kafka correlation interceptors — optional at runtime; guarded by @ConditionalOnClass.
+    compileOnly 'org.apache.kafka:kafka-clients'
+    compileOnly 'org.springframework.kafka:spring-kafka'
+    annotationProcessor 'org.springframework.boot:spring-boot-configuration-processor'
+}

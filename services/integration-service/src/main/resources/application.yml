@@ -25,6 +25,8 @@ spring:
       properties:
         spring.json.add.type.headers: true
         enable.idempotence: true
+        # Propagate the correlation id from the producing request onto every outbound record.
+        interceptor.classes: com.urunsiyabend.heimcall.common.observability.CorrelationProducerInterceptor
 
 identity:
   base-url: ${IDENTITY_BASE_URL:http://localhost:8083}

@@ -8,6 +8,7 @@ rootProject.name = 'heimcall'
 include 'libs:common-domain'
 include 'libs:common-events'
 include 'libs:common-security'
+include 'libs:common-observability'
 include 'libs:test-support'
 
 include 'services:api-gateway'
