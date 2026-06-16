@@ -81,6 +81,27 @@ services:
     volumes:
       - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
 
+  # Phase 8 T4c-2: PostgreSQL metrics. Connects to the postgres container over the compose network;
+  # pg_stat_database covers every db on the instance. Prometheus (host net) scrapes localhost:9187.
+  postgres-exporter:
+    image: quay.io/prometheuscommunity/postgres-exporter:v0.15.0
+    environment:
+      DATA_SOURCE_NAME: "postgresql://incident:incident@postgres:5432/incident?sslmode=disable"
+    ports:
+      - "9187:9187"
+    depends_on:
+      - postgres
+
+  # Phase 8 T4c-2: Redis metrics. Prometheus (host net) scrapes localhost:9121.
+  redis-exporter:
+    image: oliver006/redis_exporter:v1.62.0
+    environment:
+      REDIS_ADDR: "redis://redis:6379"
+    ports:
+      - "9121:9121"
+    depends_on:
+      - redis
+
   # Phase 8 T4c: dashboards. Auto-provisioned Prometheus datasource + Heimcall dashboards.
   # Login admin/admin (anonymous viewer also enabled). Web UI -> http://localhost:3000.
   # network_mode: host so the datasource reaches Prometheus at localhost:9090 (same firewalld reason).

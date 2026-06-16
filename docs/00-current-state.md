@@ -270,6 +270,17 @@ Ports: api-gateway 8080, integration 8081, incident 8082, identity 8083, service
   - Verified: booted incident-service, Prometheus target `incident-service` UP, Grafana datasource proxy
     resolves `incident_triggered_total{service=incident-service}`, both dashboards provisioned. Other 7
     targets down only because not running (identical config).
+- **Infra dashboards (Phase 8 T4c-2)**: PostgreSQL + Redis exporters in compose, two more Grafana dashboards.
+  - `postgres-exporter` (`:9187`, connects to the `postgres` container; `pg_stat_database` covers every db on
+    the instance) and `redis-exporter` (`:9121`, `redis` container) run as bridge containers with ports
+    published to the host, so the host-net Prometheus scrapes them at `localhost:9187`/`localhost:9121`
+    (`postgres` + `redis` scrape jobs).
+  - Dashboards (Heimcall folder): **PostgreSQL** (`pg_up`, connections/db, commits vs rollbacks, cache-hit
+    ratio, tuples fetched/returned, deadlocks) and **Redis** (`redis_up`, clients, keys, memory, ops/s,
+    keyspace-hit ratio, evicted/expired).
+  - Note: adding scrape targets needs a `docker compose restart prometheus` (no `--web.enable-lifecycle`).
+  - Verified: both targets UP, `pg_up`=1 / `redis_up`=1 via the Grafana datasource proxy, all four dashboards
+    provisioned.
 
 ### Kafka topics in use
 - `alert.received.v1` (integration-service -> incident-service) + `alert.received.v1.DLT`
@@ -438,8 +449,9 @@ restart all services off fresh jars to propagate (happy paths unaffected either 
 - T4c-1 DONE - Prometheus + Grafana in compose: scrape all 8 services' `/actuator/prometheus` + two
   auto-provisioned dashboards (JVM/HTTP, Heimcall domain metrics). Host-networked (firewalld drops
   bridge->host); see §4 Observability. Verified incident-service scraped UP + domain metric queried via Grafana.
-- Remaining deliverables (plan §Phase 8 T4c): Kubernetes probe wiring + HPA, Redis / PostgreSQL dashboards,
-  runbooks.
+- T4c-2 DONE - PostgreSQL + Redis exporters in compose + two Grafana dashboards (see §4 Observability).
+  Verified both targets UP + `pg_up`/`redis_up` queried via Grafana.
+- Remaining deliverables (plan §Phase 8 T4c): Kubernetes probe wiring + HPA, runbooks.
 
 Plus cross-cutting hardening still open (transactional outbox, Redis caches/cooldown, `processed_event`
 TTL, `reassign` + `IncidentAssignment`, JWT secret rotation/RS256).

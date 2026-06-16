@@ -24,3 +24,11 @@ scrape_configs:
         labels: { service: escalation-service }
       - targets: ["localhost:8087"]
         labels: { service: notification-service }
+
+  # Phase 8 T4c-2: infra exporters (run as compose containers, ports published to host).
+  - job_name: postgres
+    static_configs:
+      - targets: ["localhost:9187"]
+  - job_name: redis
+    static_configs:
+      - targets: ["localhost:9121"]

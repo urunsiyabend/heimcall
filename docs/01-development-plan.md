@@ -879,7 +879,12 @@ kafka_consumer_lag
   containers `network_mode: host` because firewalld drops docker-bridge->host packets, so a bridged scraper
   can't reach the host-run services (Linux-only; fine for local dev). Verified incident-service scraped UP +
   domain metric queried through Grafana.
-- **T4c+ (later)** - Kubernetes probes wiring + HPA, Redis / PostgreSQL dashboards, runbooks.
+- **T4c-2 (DONE)** - PostgreSQL + Redis dashboards. `postgres-exporter` (`:9187`, `pg_stat_database` spans
+  every db) + `redis-exporter` (`:9121`) as compose containers; host-net Prometheus scrapes them at
+  `localhost:9187`/`localhost:9121` (`postgres` + `redis` jobs). Two Grafana dashboards (PostgreSQL:
+  connections, commits/rollbacks, cache-hit, tuples, deadlocks; Redis: clients, memory, ops/s, hit ratio,
+  evicted/expired). Adding targets needs `docker compose restart prometheus`. Verified both UP + queried.
+- **T4c+ (later)** - Kubernetes probes wiring + HPA, runbooks.
 
 ## 10. Suggested Repository Structure
 
