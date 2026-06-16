@@ -864,8 +864,16 @@ kafka_consumer_lag
   `EnvironmentPostProcessor` so no service yml changes. `traceId`/`spanId` added to the JSON logback encoder.
   Spans export to a local Jaeger all-in-one (compose). Verified a single trace spanning integration ->
   incident across the Kafka hop (context on record headers).
-- **T4b+ (later)** - Grafana dashboards, Kubernetes probes wiring + HPA, Redis / PostgreSQL dashboards,
-  runbooks; instrument the integration->identity `RestClient` resolve call so identity joins the trace.
+- **T4b (DONE)** - sync REST hops join the distributed trace. Every internal `RestClient` (the six
+  `-> identity` clients, incident `-> catalog`, escalation `-> schedule`, catalog `-> escalation`) and the
+  notification `WebhookSender` built from a raw `RestClient.builder()`, which skips all `RestClientCustomizer`
+  beans — including Boot's `RestClientObservationConfiguration` customizer — so calls emitted no client span
+  and propagated no `traceparent`; callees never joined the trace. Fixed by injecting Boot's auto-configured
+  `RestClient.Builder` bean per client. No yml/config change. Verified a single Jaeger trace spanning
+  integration-service -> identity-service (`POST /v1/integration-keys/resolve`) plus the integration ->
+  incident Kafka hop.
+- **T4c+ (later)** - Grafana dashboards, Kubernetes probes wiring + HPA, Redis / PostgreSQL dashboards,
+  runbooks.
 
 ## 10. Suggested Repository Structure
 

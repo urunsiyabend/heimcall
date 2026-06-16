@@ -11,7 +11,7 @@ Last updated: 2026-06-16 (Sprint 11 - Phase 8 T4a: OpenTelemetry distributed tra
 | Architecture | Microservices-first monorepo, Gradle multi-project |
 | Build | `./gradlew build` green on Java 21 |
 | Runtime verified | Sprint 9 Phase-7 tickets 1-3.1: full loop under real JWT through the gateway (register/login -> token -> CRUD across all services -> ingest -> incident TRIGGER + NOTIFIED), JWT enforced (401 no-token, refresh-as-access rejected, client X-User-Id spoof stripped), incident queries tenant-scoped (cross-org 403) |
-| Last sprint | Sprint 11 - Phase 8 T4a (OpenTelemetry traces: HTTP+Kafka spans fleet-wide, OTLP -> Jaeger, traceId/spanId in JSON logs). Verified one trace spanning integration -> incident across the Kafka hop. |
+| Last sprint | Sprint 12 - Phase 8 T4b (sync REST hops join the trace: all internal `RestClient`s + webhook sender now use Boot's auto-configured `RestClient.Builder`, so they emit client spans + propagate `traceparent`). Verified one trace spanning integration -> identity (key resolve) + integration -> incident (Kafka). |
 | Tests | First automated test: `OnCallCalculatorTest` (rotation math) |
 | Auth | Real JWT (HS256, `libs/common-security`): identity issues access+refresh; every service validates Bearer and derives `X-User-Id` from the verified token. Header-context stub retired. |
 
@@ -248,8 +248,14 @@ Ports: api-gateway 8080, integration 8081, incident 8082, identity 8083, service
     send` spanning integration-service + incident-service, context propagated over Kafka record headers; both
     services report `otel.library=org.springframework.boot 3.3.5`. Warm client latency ~20ms; the larger
     end-to-end trace duration is async Kafka poll latency + cross-host clock skew, not request time.
-  - Known gap: the integration -> identity `RestClient` resolve call isn't observation-instrumented, so
-    identity-service doesn't yet join the trace. Deferred.
+  - **Sync REST hops (Phase 8 T4b)**: every internal `RestClient` (integration/incident/escalation/
+    notification/schedule/catalog -> identity, incident -> catalog, escalation -> schedule, catalog ->
+    escalation) and the notification `WebhookSender` now build from Boot's **auto-configured
+    `RestClient.Builder`** bean (injected) instead of a raw `RestClient.builder()`. The auto-configured
+    builder carries `RestClientObservationConfiguration`'s customizer, so each call emits a client span and
+    propagates `traceparent` — the callee joins the trace. No yml/config change; observation comes from the
+    customizer. Verified one trace spanning integration-service -> identity-service (`POST
+    /v1/integration-keys/resolve`) + the integration -> incident Kafka hop in a single Jaeger trace.
 
 ### Kafka topics in use
 - `alert.received.v1` (integration-service -> incident-service) + `alert.received.v1.DLT`
@@ -412,8 +418,11 @@ restart all services off fresh jars to propagate (happy paths unaffected either 
   listeners (see §4 Observability).
 - T4a DONE - OpenTelemetry distributed traces fleet-wide: HTTP + Kafka spans, OTLP -> Jaeger, traceId/spanId
   in JSON logs (see §4 Observability). Verified one cross-service trace over the Kafka hop.
+- T4b DONE - sync REST hops join the trace: all internal `RestClient`s + the webhook sender build from Boot's
+  auto-configured `RestClient.Builder` (observation customizer), so they emit client spans + propagate
+  `traceparent` (see §4 Observability). Verified integration -> identity + integration -> incident in one trace.
 - Remaining deliverables (plan §Phase 8 T4b+): Grafana dashboards, Kubernetes probe wiring + HPA,
-  Redis / PostgreSQL dashboards, runbooks; trace the integration->identity RestClient call.
+  Redis / PostgreSQL dashboards, runbooks.
 
 Plus cross-cutting hardening still open (transactional outbox, Redis caches/cooldown, `processed_event`
 TTL, `reassign` + `IncidentAssignment`, JWT secret rotation/RS256).
