@@ -18,8 +18,11 @@ public class IdentityClient {
 
     private final RestClient restClient;
 
-    public IdentityClient(@Value("${identity.base-url:http://localhost:8083}") String baseUrl) {
-        this.restClient = RestClient.builder().baseUrl(baseUrl).build();
+    public IdentityClient(RestClient.Builder builder,
+                          @Value("${identity.base-url:http://localhost:8083}") String baseUrl) {
+        // Boot's auto-configured builder carries the observation customizer, so this client emits a
+        // client span + traceparent header and identity-service joins the distributed trace (Phase 8 T4b).
+        this.restClient = builder.baseUrl(baseUrl).build();
     }
 
     public record Resolution(UUID organizationId, UUID integrationId, String name) {

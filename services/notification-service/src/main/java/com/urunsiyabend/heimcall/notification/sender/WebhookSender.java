@@ -23,11 +23,14 @@ public class WebhookSender implements NotificationSender {
 
     private final RestClient restClient;
 
-    public WebhookSender(@Value("${notification.webhook.timeout-ms:5000}") long timeoutMs) {
+    public WebhookSender(RestClient.Builder builder,
+                         @Value("${notification.webhook.timeout-ms:5000}") long timeoutMs) {
         SimpleClientHttpRequestFactory factory = new SimpleClientHttpRequestFactory();
         factory.setConnectTimeout(Duration.ofMillis(timeoutMs));
         factory.setReadTimeout(Duration.ofMillis(timeoutMs));
-        this.restClient = RestClient.builder().requestFactory(factory).build();
+        // Boot's auto-configured builder carries the observation customizer, so outbound webhook
+        // deliveries emit a client span and stay on the distributed trace (Phase 8 T4b).
+        this.restClient = builder.requestFactory(factory).build();
     }
 
     @Override

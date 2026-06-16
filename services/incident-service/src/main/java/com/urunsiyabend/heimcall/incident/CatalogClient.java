@@ -23,8 +23,11 @@ public class CatalogClient {
 
     private final RestClient restClient;
 
-    public CatalogClient(@Value("${catalog.base-url:http://localhost:8084}") String baseUrl) {
-        this.restClient = RestClient.builder().baseUrl(baseUrl).build();
+    public CatalogClient(RestClient.Builder builder,
+                         @Value("${catalog.base-url:http://localhost:8084}") String baseUrl) {
+        // Boot's auto-configured builder carries the observation customizer, so this client emits a
+        // client span + traceparent header and the callee joins the distributed trace (Phase 8 T4b).
+        this.restClient = builder.baseUrl(baseUrl).build();
     }
 
     public record Routing(UUID serviceId, UUID escalationPolicyId, UUID ownerTeamId) {

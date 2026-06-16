@@ -18,8 +18,11 @@ public class EscalationClient {
 
     private final RestClient restClient;
 
-    public EscalationClient(@Value("${escalation.base-url:http://localhost:8086}") String baseUrl) {
-        this.restClient = RestClient.builder().baseUrl(baseUrl).build();
+    public EscalationClient(RestClient.Builder builder,
+                            @Value("${escalation.base-url:http://localhost:8086}") String baseUrl) {
+        // Boot's auto-configured builder carries the observation customizer, so this client emits a
+        // client span + traceparent header and the callee joins the distributed trace (Phase 8 T4b).
+        this.restClient = builder.baseUrl(baseUrl).build();
     }
 
     /** Throws 409 if the policy does not exist in the org. */

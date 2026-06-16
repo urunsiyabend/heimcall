@@ -23,8 +23,11 @@ public class ScheduleClient {
 
     private final RestClient restClient;
 
-    public ScheduleClient(@Value("${schedule.base-url:http://localhost:8085}") String baseUrl) {
-        this.restClient = RestClient.builder().baseUrl(baseUrl).build();
+    public ScheduleClient(RestClient.Builder builder,
+                          @Value("${schedule.base-url:http://localhost:8085}") String baseUrl) {
+        // Boot's auto-configured builder carries the observation customizer, so this client emits a
+        // client span + traceparent header and the callee joins the distributed trace (Phase 8 T4b).
+        this.restClient = builder.baseUrl(baseUrl).build();
     }
 
     private record OnCall(UUID userId, String source, UUID rotationId) {
