@@ -466,10 +466,21 @@ restart all services off fresh jars to propagate (happy paths unaffected either 
   stay local, k8s injects DNS. Chart deploys **only** the 8 services; Postgres/Kafka/Redis/Jaeger are BYO
   via `infra.*` in values. **Runbooks** `docs/05-runbooks.md`: 8 playbooks (service-down, kafka lag, notify
   failures, trigger storm, slow ack/resolve, postgres, redis, http latency) tied to the shipped metrics +
-  Grafana dashboards. Verified: `helm lint` clean + renders 8 Deploy / 8 Svc / 2 HPA (gateway carries no DB
-  env, db services map correct db + secret keys); incident-service image built (layered extraction) + smoke-
-  run (Spring context boots, JSON logs active, fails only on the absent datasource — exactly what Helm's
-  `DB_URL`/secret env supply in a real deploy).
+  Grafana dashboards. **Verified end-to-end on a real `kind` cluster** (not just render): `helm install`
+  brought all 8 services to `Running 1/1` (liveness/readiness probes passing); api-gateway + incident-service
+  ran 2 replicas each (HPA minReplicas) and after a `metrics-server` install the HPAs read real CPU
+  (gw 1%/70%, incident 5%/70%). Full product flow through the gateway: register -> org -> membership ->
+  integration-key -> ingest -> (Kafka) -> incident **TRIGGERED**; lifecycle ACK -> `ACKNOWLEDGED`,
+  resolve -> `RESOLVED`, timeline `TRIGGER -> NO_POLICY -> ACK -> RESOLVE`. In-cluster deps (postgres w/ the
+  7 service dbs, Kafka KRaft, Jaeger) come from `deploy/kind/` (infra.yaml + pg-initdb-configmap.yaml —
+  reusable local-verify scaffolding; the chart itself stays deps-BYO). Three issues surfaced + fixed during
+  the real deploy (render had hidden them): (1) stale `-plain.jar`s from pre-disable builds broke the docker
+  COPY glob — `rm` them (the build.gradle disable is correct for fresh builds); (2) docker 29's
+  containerd-store multi-arch index made `kind load docker-image` fail with "content digest not found" — the
+  kind node pulled the infra images directly instead; (3) `confluentinc/cp-kafka` KRaft crashed opaquely
+  (ensure-script exit 1, no log) — switched `deploy/kind/infra.yaml` to `apache/kafka:3.8.1` (self-formats,
+  consumer groups joined). `helm lint` + template also clean (8 Deploy / 8 Svc / 2 HPA; gateway carries no
+  DB env; db services map correct db + secret keys).
   Known gaps (deferred): default jwt/db secrets are DEV-ONLY (documented in NOTES + comments) — real envs
   override; no infra subcharts (deps are BYO); no Ingress (gateway via LoadBalancer/port-forward).
 

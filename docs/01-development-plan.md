@@ -893,8 +893,12 @@ kafka_consumer_lag
   URIs + UI origin + LoadBalancer). HPA on api-gateway (2-5) + incident-service (2-6) on CPU 70%. Gateway
   route URIs made env-overridable (`${CATALOG_URI:...}`) so they resolve cluster Service DNS. Chart deploys
   only the 8 services; Postgres/Kafka/Redis/Jaeger are BYO via `infra.*`. Runbooks in `docs/05-runbooks.md`
-  (8 playbooks tied to the shipped metrics/dashboards). Verified: `helm lint` clean + renders 8 Deploy/8
-  Svc/2 HPA; one image built + boots (Spring context up, JSON logs, fails only on absent datasource).
+  (8 playbooks tied to the shipped metrics/dashboards). Verified **end-to-end on a real `kind` cluster**:
+  `helm install` -> all 8 services `Running 1/1` (probes pass), gateway+incident 2 replicas (HPA min), HPAs
+  read real CPU after a metrics-server install; full flow register -> org -> key -> ingest -> (Kafka) ->
+  incident TRIGGERED -> ACK -> RESOLVE (timeline `TRIGGER/NO_POLICY/ACK/RESOLVE`). In-cluster deps from
+  `deploy/kind/`. Three real-deploy fixes (render hid them): stale `-plain.jar` glob, docker-29 multi-arch
+  `kind load` digest error (node pulled directly), and `cp-kafka` KRaft opaque crash -> `apache/kafka:3.8.1`.
 
 ## 10. Suggested Repository Structure
 
