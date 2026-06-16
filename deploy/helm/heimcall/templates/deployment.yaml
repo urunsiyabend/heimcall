@@ -1,0 +1,109 @@
+{{- $root := . }}
+{{- range $name, $svc := .Values.services }}
+{{- $port := $svc.port }}
+{{- $auto := merge (dict) (default (dict) $svc.autoscaling) $root.Values.defaults.autoscaling }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "heimcall.labels" $root | nindent 4 }}
+    app.kubernetes.io/component: {{ $name }}
+spec:
+  {{- if not $auto.enabled }}
+  replicas: {{ default $root.Values.defaults.replicas $svc.replicas }}
+  {{- end }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ $name }}
+      app.kubernetes.io/instance: {{ $root.Release.Name }}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: {{ $name }}
+        app.kubernetes.io/instance: {{ $root.Release.Name }}
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/path: /actuator/prometheus
+        prometheus.io/port: {{ $port | quote }}
+    spec:
+      containers:
+        - name: {{ $name }}
+          image: "{{ $root.Values.image.repository }}/{{ $name }}:{{ $root.Values.image.tag }}"
+          imagePullPolicy: {{ $root.Values.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: {{ $port }}
+          env:
+            - name: KAFKA_BOOTSTRAP_SERVERS
+              value: {{ $root.Values.infra.kafkaBootstrapServers | quote }}
+            - name: MANAGEMENT_OTLP_TRACING_ENDPOINT
+              value: {{ $root.Values.infra.otlpTracingEndpoint | quote }}
+            - name: HEIMCALL_JWT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "heimcall.fullname" $root }}-secrets
+                  key: jwt-secret
+            # Cross-service REST base-urls (resolved to cluster Service DNS).
+            - name: IDENTITY_BASE_URL
+              value: {{ include "heimcall.svcUrl" (dict "name" "identity-service" "root" $root) | quote }}
+            - name: CATALOG_BASE_URL
+              value: {{ include "heimcall.svcUrl" (dict "name" "service-catalog-service" "root" $root) | quote }}
+            - name: SCHEDULE_BASE_URL
+              value: {{ include "heimcall.svcUrl" (dict "name" "schedule-service" "root" $root) | quote }}
+            - name: ESCALATION_BASE_URL
+              value: {{ include "heimcall.svcUrl" (dict "name" "escalation-service" "root" $root) | quote }}
+            {{- if eq $name "api-gateway" }}
+            - name: HEIMCALL_UI_ORIGIN
+              value: {{ $root.Values.infra.uiOrigin | quote }}
+            - name: IDENTITY_URI
+              value: {{ include "heimcall.svcUrl" (dict "name" "identity-service" "root" $root) | quote }}
+            - name: CATALOG_URI
+              value: {{ include "heimcall.svcUrl" (dict "name" "service-catalog-service" "root" $root) | quote }}
+            - name: SCHEDULE_URI
+              value: {{ include "heimcall.svcUrl" (dict "name" "schedule-service" "root" $root) | quote }}
+            - name: ESCALATION_URI
+              value: {{ include "heimcall.svcUrl" (dict "name" "escalation-service" "root" $root) | quote }}
+            - name: NOTIFICATION_URI
+              value: {{ include "heimcall.svcUrl" (dict "name" "notification-service" "root" $root) | quote }}
+            - name: INTEGRATION_URI
+              value: {{ include "heimcall.svcUrl" (dict "name" "integration-service" "root" $root) | quote }}
+            - name: INCIDENT_URI
+              value: {{ include "heimcall.svcUrl" (dict "name" "incident-service" "root" $root) | quote }}
+            {{- end }}
+            {{- if $svc.db }}
+            - name: DB_URL
+              value: "jdbc:postgresql://{{ $root.Values.infra.postgresHost }}:{{ $root.Values.infra.postgresPort }}/{{ $svc.db }}"
+            - name: DB_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "heimcall.fullname" $root }}-secrets
+                  key: {{ $name }}-db-username
+            - name: DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "heimcall.fullname" $root }}-secrets
+                  key: {{ $name }}-db-password
+            {{- end }}
+          startupProbe:
+            httpGet:
+              path: /actuator/health/readiness
+              port: http
+            failureThreshold: {{ $root.Values.probes.startup.failureThreshold }}
+            periodSeconds: {{ $root.Values.probes.startup.periodSeconds }}
+          livenessProbe:
+            httpGet:
+              path: /actuator/health/liveness
+              port: http
+            periodSeconds: {{ $root.Values.probes.liveness.periodSeconds }}
+            failureThreshold: {{ $root.Values.probes.liveness.failureThreshold }}
+          readinessProbe:
+            httpGet:
+              path: /actuator/health/readiness
+              port: http
+            periodSeconds: {{ $root.Values.probes.readiness.periodSeconds }}
+            failureThreshold: {{ $root.Values.probes.readiness.failureThreshold }}
+          resources:
+            {{- toYaml (default $root.Values.defaults.resources $svc.resources) | nindent 12 }}
+---
+{{- end }}

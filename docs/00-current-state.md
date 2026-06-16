@@ -434,7 +434,7 @@ Operational note: the `common-security` lib carries two recent changes — the t
 and the ticket 4 stream-path-scoped `access_token` query param. Both ship to every service on rebuild;
 restart all services off fresh jars to propagate (happy paths unaffected either way).
 
-**Phase 8 - Observability and Production Readiness** (in progress):
+**Phase 8 - Observability and Production Readiness** (complete):
 - T1 DONE - `common-observability`: structured JSON logging + correlation ids across the fleet (HTTP->Kafka->log).
   Gateway reactive `WebFilter` deferred (servlet filter does not bind; client headers still forwarded).
 - T2 DONE - Prometheus metrics + actuator probes: `/actuator/prometheus` + `health/{liveness,readiness}`
@@ -451,7 +451,29 @@ restart all services off fresh jars to propagate (happy paths unaffected either 
   bridge->host); see §4 Observability. Verified incident-service scraped UP + domain metric queried via Grafana.
 - T4c-2 DONE - PostgreSQL + Redis exporters in compose + two Grafana dashboards (see §4 Observability).
   Verified both targets UP + `pg_up`/`redis_up` queried via Grafana.
-- Remaining deliverables (plan §Phase 8 T4c): Kubernetes probe wiring + HPA, runbooks.
+- T4c+ DONE - Kubernetes deploy + probes + HPA + runbooks. **Dockerfile per service** (`services/<svc>/
+  Dockerfile`): multi-stage, `eclipse-temurin:21-jre`, Spring layered-jar extraction (dep layers cache),
+  non-root uid 1001, `JarLauncher` entrypoint. Root `build.gradle` disables the redundant `-plain.jar` for
+  boot services (`plugins.withType(SpringBootPlugin)`) so `COPY build/libs/*.jar` is unambiguous. **Helm
+  chart `deploy/helm/heimcall`**: one range-over-services template each for Deployment / Service / HPA.
+  Probes -> `/actuator/health/{liveness,readiness}`; startupProbe (failureThreshold 30 x 5s = ~150s grace)
+  shields slow JVM+Flyway boot, liveness/readiness take over after. Shared `Secret` (jwt-secret + per-db
+  username/password, dev defaults = db name, overridable via `secrets.db.<svc>`) + env wiring:
+  `KAFKA_BOOTSTRAP_SERVERS`, `MANAGEMENT_OTLP_TRACING_ENDPOINT`, `HEIMCALL_JWT_SECRET`, cross-service
+  `*_BASE_URL` (cluster Service DNS); gateway also gets the route `*_URI`s + `HEIMCALL_UI_ORIGIN` +
+  `serviceType: LoadBalancer`. HPA on api-gateway (2-5) + incident-service (2-6), CPU 70%. Gateway
+  `application.yml` route URIs made env-overridable (`${CATALOG_URI:http://localhost:8084}` ...) — defaults
+  stay local, k8s injects DNS. Chart deploys **only** the 8 services; Postgres/Kafka/Redis/Jaeger are BYO
+  via `infra.*` in values. **Runbooks** `docs/05-runbooks.md`: 8 playbooks (service-down, kafka lag, notify
+  failures, trigger storm, slow ack/resolve, postgres, redis, http latency) tied to the shipped metrics +
+  Grafana dashboards. Verified: `helm lint` clean + renders 8 Deploy / 8 Svc / 2 HPA (gateway carries no DB
+  env, db services map correct db + secret keys); incident-service image built (layered extraction) + smoke-
+  run (Spring context boots, JSON logs active, fails only on the absent datasource — exactly what Helm's
+  `DB_URL`/secret env supply in a real deploy).
+  Known gaps (deferred): default jwt/db secrets are DEV-ONLY (documented in NOTES + comments) — real envs
+  override; no infra subcharts (deps are BYO); no Ingress (gateway via LoadBalancer/port-forward).
+
+**Phase 8 complete** (T1-T4c+).
 
 Plus cross-cutting hardening still open (transactional outbox, Redis caches/cooldown, `processed_event`
 TTL, `reassign` + `IncidentAssignment`, JWT secret rotation/RS256).

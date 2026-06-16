@@ -884,7 +884,17 @@ kafka_consumer_lag
   `localhost:9187`/`localhost:9121` (`postgres` + `redis` jobs). Two Grafana dashboards (PostgreSQL:
   connections, commits/rollbacks, cache-hit, tuples, deadlocks; Redis: clients, memory, ops/s, hit ratio,
   evicted/expired). Adding targets needs `docker compose restart prometheus`. Verified both UP + queried.
-- **T4c+ (later)** - Kubernetes probes wiring + HPA, runbooks.
+- **T4c+ (DONE)** - Kubernetes deploy + probes + HPA + runbooks. Dockerfile per service (multi-stage,
+  `eclipse-temurin:21-jre`, Spring layered-jar extraction, non-root); root `build.gradle` disables the
+  redundant `-plain.jar` for boot services so the COPY glob is unambiguous. Helm chart `deploy/helm/heimcall`
+  renders Deployment+Service+HPA per service from one range-over-services template each: liveness/readiness
+  probes -> `/actuator/health/{liveness,readiness}`, startupProbe (~150s) shields slow Flyway boot; shared
+  Secret (jwt + per-db creds) + env wiring (kafka/otlp/jwt/cross-service base-urls; gateway also gets route
+  URIs + UI origin + LoadBalancer). HPA on api-gateway (2-5) + incident-service (2-6) on CPU 70%. Gateway
+  route URIs made env-overridable (`${CATALOG_URI:...}`) so they resolve cluster Service DNS. Chart deploys
+  only the 8 services; Postgres/Kafka/Redis/Jaeger are BYO via `infra.*`. Runbooks in `docs/05-runbooks.md`
+  (8 playbooks tied to the shipped metrics/dashboards). Verified: `helm lint` clean + renders 8 Deploy/8
+  Svc/2 HPA; one image built + boots (Spring context up, JSON logs, fails only on absent datasource).
 
 ## 10. Suggested Repository Structure
 

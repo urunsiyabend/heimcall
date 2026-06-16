@@ -39,4 +39,12 @@ subprojects {
     tasks.named('test') {
         useJUnitPlatform()
     }
+
+    // Boot services ship a layered bootJar; disable the redundant plain jar so
+    // build/libs holds a single artifact (keeps the Dockerfile COPY glob unambiguous).
+    plugins.withType(org.springframework.boot.gradle.plugin.SpringBootPlugin) {
+        tasks.named('jar') {
+            enabled = false
+        }
+    }
 }

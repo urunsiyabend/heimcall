@@ -16,33 +16,35 @@ spring:
             allow-credentials: true
       routes:
         # More specific catalog/schedule routes must precede identity's /v1/organizations/** route.
+        # Upstream URIs are env-overridable so the gateway resolves cluster Service DNS
+        # in k8s (e.g. CATALOG_URI=http://service-catalog-service:8084); defaults stay local.
         - id: service-catalog-service
-          uri: http://localhost:8084
+          uri: ${CATALOG_URI:http://localhost:8084}
           predicates:
             - Path=/v1/organizations/*/services/**
         - id: schedule-service
-          uri: http://localhost:8085
+          uri: ${SCHEDULE_URI:http://localhost:8085}
           predicates:
             - Path=/v1/organizations/*/schedules/**
         - id: escalation-service
-          uri: http://localhost:8086
+          uri: ${ESCALATION_URI:http://localhost:8086}
           predicates:
             - Path=/v1/organizations/*/escalation-policies/**
         # Notification routes are nested under /v1/organizations/** so must precede the identity route.
         - id: notification-service
-          uri: http://localhost:8087
+          uri: ${NOTIFICATION_URI:http://localhost:8087}
           predicates:
             - Path=/v1/organizations/*/users/*/contact-methods/**,/v1/organizations/*/deliveries/**
         - id: identity-service
-          uri: http://localhost:8083
+          uri: ${IDENTITY_URI:http://localhost:8083}
           predicates:
             - Path=/v1/auth/**,/v1/organizations/**,/v1/users/**,/v1/integration-keys/**
         - id: integration-service
-          uri: http://localhost:8081
+          uri: ${INTEGRATION_URI:http://localhost:8081}
           predicates:
             - Path=/v1/integrations/**
         - id: incident-service
-          uri: http://localhost:8082
+          uri: ${INCIDENT_URI:http://localhost:8082}
           predicates:
             - Path=/v1/incidents/**
 

@@ -1,0 +1,16 @@
+Heimcall fleet deployed as release "{{ .Release.Name }}" in namespace "{{ .Release.Namespace }}".
+
+Services (ClusterIP unless noted):
+{{- range $name, $svc := .Values.services }}
+  - {{ $name }}: :{{ $svc.port }}{{ if $svc.serviceType }} ({{ $svc.serviceType }}){{ end }}
+{{- end }}
+
+Reach the API gateway:
+  kubectl -n {{ .Release.Namespace }} port-forward svc/api-gateway 8080:{{ (index .Values.services "api-gateway").port }}
+
+Check rollout / probes:
+  kubectl -n {{ .Release.Namespace }} get deploy,pods,hpa -l app.kubernetes.io/part-of=heimcall
+
+Reminder: this chart deploys only the Heimcall services. Postgres, Kafka, Redis,
+and the OTLP collector (Jaeger) must already be reachable at infra.* in values.yaml.
+The default secrets are DEV-ONLY — override secrets.jwtSecret and secrets.db before any real env.

@@ -1,0 +1,88 @@
+# Heimcall fleet — one Deployment + Service per microservice, optional HPA.
+# Service images: heimcall/<service>:<tag> (built from each service's Dockerfile).
+
+image:
+  repository: heimcall
+  tag: 0.0.1-SNAPSHOT
+  pullPolicy: IfNotPresent
+
+# Shared infra endpoints. Point these at in-cluster Services or external hosts.
+# Postgres/Kafka/Redis/Jaeger are NOT part of this chart — bring your own (or run
+# the compose deps); this chart deploys only the Heimcall services.
+infra:
+  kafkaBootstrapServers: kafka:9092
+  otlpTracingEndpoint: http://jaeger-collector:4318/v1/traces
+  postgresHost: postgres
+  postgresPort: "5432"
+  uiOrigin: http://localhost:5173
+
+# Secrets. Defaults are DEV-ONLY — override in real envs (--set / sealed secret / external secret).
+# db username + password default to the db name (matches the compose initdb roles);
+# override per service under secrets.db.<service>.{username,password}.
+secrets:
+  jwtSecret: dev-only-heimcall-jwt-secret-change-me-32b+
+  db: {}
+
+# Applied to every service unless overridden in the per-service block below.
+defaults:
+  replicas: 1
+  resources:
+    requests:
+      cpu: 250m
+      memory: 512Mi
+    limits:
+      cpu: "1"
+      memory: 768Mi
+  autoscaling:
+    enabled: false
+    minReplicas: 1
+    maxReplicas: 4
+    targetCPUUtilizationPercentage: 70
+
+# Probe tuning shared by all services. startupProbe shields slow JVM+Flyway boot;
+# liveness/readiness only take over once startup passes.
+probes:
+  startup:
+    failureThreshold: 30
+    periodSeconds: 5
+  liveness:
+    periodSeconds: 10
+    failureThreshold: 3
+  readiness:
+    periodSeconds: 10
+    failureThreshold: 3
+
+# Per-service overrides. `db` omitted => no datasource env injected (api-gateway).
+services:
+  api-gateway:
+    port: 8080
+    serviceType: LoadBalancer
+    autoscaling:
+      enabled: true
+      minReplicas: 2
+      maxReplicas: 5
+  identity-service:
+    port: 8083
+    db: identity
+  service-catalog-service:
+    port: 8084
+    db: catalog
+  schedule-service:
+    port: 8085
+    db: schedule
+  integration-service:
+    port: 8081
+    db: integration
+  incident-service:
+    port: 8082
+    db: incident
+    autoscaling:
+      enabled: true
+      minReplicas: 2
+      maxReplicas: 6
+  escalation-service:
+    port: 8086
+    db: escalation
+  notification-service:
+    port: 8087
+    db: notification

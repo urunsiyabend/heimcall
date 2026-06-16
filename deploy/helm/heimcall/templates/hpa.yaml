@@ -1,0 +1,28 @@
+{{- $root := . }}
+{{- range $name, $svc := .Values.services }}
+{{- $auto := merge (dict) (default (dict) $svc.autoscaling) $root.Values.defaults.autoscaling }}
+{{- if $auto.enabled }}
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "heimcall.labels" $root | nindent 4 }}
+    app.kubernetes.io/component: {{ $name }}
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: {{ $name }}
+  minReplicas: {{ $auto.minReplicas }}
+  maxReplicas: {{ $auto.maxReplicas }}
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: {{ $auto.targetCPUUtilizationPercentage }}
+---
+{{- end }}
+{{- end }}
