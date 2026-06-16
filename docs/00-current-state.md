@@ -2,7 +2,7 @@
 
 Living document. Update at the end of every sprint. Reflects what is actually built and running, not what is planned. Plan lives in `01-development-plan.md`; this file is the source of truth for "where are we now".
 
-Last updated: 2026-06-11 (Sprint 10 - Phase 8 T1-T3: JSON logs + correlation ids; Prometheus metrics + probes; Kafka consumer-lag)
+Last updated: 2026-06-16 (Sprint 11 - Phase 8 T4a: OpenTelemetry distributed traces fleet-wide)
 
 ## 1. Snapshot
 
@@ -11,7 +11,7 @@ Last updated: 2026-06-11 (Sprint 10 - Phase 8 T1-T3: JSON logs + correlation ids
 | Architecture | Microservices-first monorepo, Gradle multi-project |
 | Build | `./gradlew build` green on Java 21 |
 | Runtime verified | Sprint 9 Phase-7 tickets 1-3.1: full loop under real JWT through the gateway (register/login -> token -> CRUD across all services -> ingest -> incident TRIGGER + NOTIFIED), JWT enforced (401 no-token, refresh-as-access rejected, client X-User-Id spoof stripped), incident queries tenant-scoped (cross-org 403) |
-| Last sprint | Sprint 10 - Phase 8 T1+T2 (JSON logback + correlation ids fleet-wide; Prometheus metrics + domain meters + actuator probes) |
+| Last sprint | Sprint 11 - Phase 8 T4a (OpenTelemetry traces: HTTP+Kafka spans fleet-wide, OTLP -> Jaeger, traceId/spanId in JSON logs). Verified one trace spanning integration -> incident across the Kafka hop. |
 | Tests | First automated test: `OnCallCalculatorTest` (rotation math) |
 | Auth | Real JWT (HS256, `libs/common-security`): identity issues access+refresh; every service validates Bearer and derives `X-User-Id` from the verified token. Header-context stub retired. |
 
@@ -31,7 +31,7 @@ libs/
   common-domain     enums: MessageType, Severity, IncidentStatus, AlertStatus
   common-events      event records (Alert*, Incident triggered/acknowledged/resolved/canceled, Notification*), Topics constants
   common-security    HS256 JWT auto-config: JwtSupport (issue/verify), JwtAuthenticationFilter (Bearer -> principal + derives X-User-Id), stateless SecurityFilterChain. Added by every service via one dependency.
-  common-observability  (Phase 8 T1) auto-config: logstash JSON logback, servlet CorrelationIdFilter (X-Correlation-Id in/out via MDC), Kafka CorrelationProducerInterceptor (stamps id on outbound records) + CorrelationRecordInterceptor (lifts id back into MDC on every listener). Added by every service via one dependency.
+  common-observability  (Phase 8 T1-T4a) auto-config: logstash JSON logback, servlet CorrelationIdFilter (X-Correlation-Id in/out via MDC), Kafka CorrelationProducerInterceptor (stamps id on outbound records) + CorrelationRecordInterceptor (lifts id back into MDC on every listener); micrometer-registry-prometheus + native Kafka client metrics; (T4a) micrometer-tracing-bridge-otel + OTLP exporter, KafkaTracing BPP enabling observation on the services' own KafkaTemplate/listener factory beans, traceId/spanId in the JSON logs, TracingDefaultsEnvironmentPostProcessor (sampling + OTLP endpoint defaults). Added by every service via one dependency.
   test-support       Testcontainers singletons (PG + Kafka) - not yet used
 services/
   api-gateway        Spring Cloud Gateway, routes -> catalog 8084, schedule 8085, escalation 8086, identity 8083 (incl. /v1/auth/**), integration 8081, incident 8082; CORS for the UI origin; forwards Authorization (validation is per-service)
@@ -230,6 +230,26 @@ Ports: api-gateway 8080, integration 8081, incident 8082, identity 8083, service
   double bind. Result: `kafka_consumer_fetch_manager_records_lag_max` + the full `kafka_consumer_*` family
   exported for every consumer (verified incl. the primary `alert-received` consumer). Producer client metrics
   bind on first publish (listener attached to the producer-factory beans).
+- **Distributed traces (Phase 8 T4a)**: `micrometer-tracing-bridge-otel` + `opentelemetry-exporter-otlp` on
+  every service via `common-observability`. Boot auto-configures the tracer, the OTLP/HTTP span exporter, and
+  HTTP server+client (servlet + WebFlux) spans by classpath presence. Spans export to a local **Jaeger**
+  all-in-one (compose; OTLP `:4318`, UI `http://localhost:16686`).
+  - **Kafka spans**: `KafkaTracing` (gated on the `Tracer`) flips `observationEnabled(true)` on every
+    `KafkaTemplate` and `ConcurrentKafkaListenerContainerFactory` **bean** via a `BeanPostProcessor` — Boot's
+    `spring.kafka.{template,listener}.observation-enabled` flags only reach the factory/template Boot
+    auto-creates, but each service defines its own (DLT + events producers, custom listeners). Same
+    custom-factory gap as T3.
+  - **Defaults without touching 8 ymls**: `TracingDefaultsEnvironmentPostProcessor` (registered via
+    `META-INF/spring.factories`) adds a lowest-precedence source: `sampling.probability=1.0` (dev) and the
+    OTLP endpoint (`OTLP_TRACES_ENDPOINT` overridable). Real config / env vars still win.
+  - **Logs**: `traceId` + `spanId` added to the JSON encoder (Micrometer's correlation listener populates the
+    MDC), so a log line ties to its trace alongside the existing `correlationId`.
+  - Verified: one trace `HTTP POST -> alert.received.v1 send -> (incident) receive -> incident.triggered.v1
+    send` spanning integration-service + incident-service, context propagated over Kafka record headers; both
+    services report `otel.library=org.springframework.boot 3.3.5`. Warm client latency ~20ms; the larger
+    end-to-end trace duration is async Kafka poll latency + cross-host clock skew, not request time.
+  - Known gap: the integration -> identity `RestClient` resolve call isn't observation-instrumented, so
+    identity-service doesn't yet join the trace. Deferred.
 
 ### Kafka topics in use
 - `alert.received.v1` (integration-service -> incident-service) + `alert.received.v1.DLT`
@@ -390,8 +410,10 @@ restart all services off fresh jars to propagate (happy paths unaffected either 
   on every service; domain meters on incident/notification/escalation (see §4 Observability).
 - T3 DONE - native Kafka client metrics (consumer lag) fleet-wide via container-factory-reached Micrometer
   listeners (see §4 Observability).
-- Remaining deliverables (plan §Phase 8): OpenTelemetry traces, Grafana dashboards, Kubernetes probe
-  wiring + HPA, Redis / PostgreSQL dashboards, runbooks.
+- T4a DONE - OpenTelemetry distributed traces fleet-wide: HTTP + Kafka spans, OTLP -> Jaeger, traceId/spanId
+  in JSON logs (see §4 Observability). Verified one cross-service trace over the Kafka hop.
+- Remaining deliverables (plan §Phase 8 T4b+): Grafana dashboards, Kubernetes probe wiring + HPA,
+  Redis / PostgreSQL dashboards, runbooks; trace the integration->identity RestClient call.
 
 Plus cross-cutting hardening still open (transactional outbox, Redis caches/cooldown, `processed_event`
 TTL, `reassign` + `IncidentAssignment`, JWT secret rotation/RS256).

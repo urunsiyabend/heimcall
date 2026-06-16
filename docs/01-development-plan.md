@@ -855,8 +855,17 @@ kafka_consumer_lag
   hidden non-bean fallback factory. Fixed in `common-observability` by attaching Micrometer consumer/producer
   listeners through the `ConcurrentKafkaListenerContainerFactory` beans after singletons exist. Verified
   `kafka_consumer_fetch_manager_records_lag_max` exported for every consumer incl. the primary one.
-- **T4+ (later)** - OpenTelemetry traces, Grafana dashboards, Kubernetes probes wiring + HPA,
-  Redis / PostgreSQL dashboards, runbooks.
+- **T4a (DONE)** - OpenTelemetry distributed traces fleet-wide. `micrometer-tracing-bridge-otel` +
+  `opentelemetry-exporter-otlp` in `common-observability`; Boot auto-configures the tracer, OTLP/HTTP
+  exporter, and HTTP server+client spans. Kafka spans need a nudge (same custom-factory gap as T3): a
+  `KafkaTracing` `BeanPostProcessor` flips `observationEnabled(true)` on the services' own `KafkaTemplate`
+  and `ConcurrentKafkaListenerContainerFactory` beans, since Boot's observation-enabled yml flags only reach
+  the template/factory it auto-creates. Fleet-wide defaults (sampling, OTLP endpoint) via an
+  `EnvironmentPostProcessor` so no service yml changes. `traceId`/`spanId` added to the JSON logback encoder.
+  Spans export to a local Jaeger all-in-one (compose). Verified a single trace spanning integration ->
+  incident across the Kafka hop (context on record headers).
+- **T4b+ (later)** - Grafana dashboards, Kubernetes probes wiring + HPA, Redis / PostgreSQL dashboards,
+  runbooks; instrument the integration->identity `RestClient` resolve call so identity joins the trace.
 
 ## 10. Suggested Repository Structure
 
