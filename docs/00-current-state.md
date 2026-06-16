@@ -256,6 +256,20 @@ Ports: api-gateway 8080, integration 8081, incident 8082, identity 8083, service
     propagates `traceparent` — the callee joins the trace. No yml/config change; observation comes from the
     customizer. Verified one trace spanning integration-service -> identity-service (`POST
     /v1/integration-keys/resolve`) + the integration -> incident Kafka hop in a single Jaeger trace.
+- **Dashboards (Phase 8 T4c-1)**: Prometheus + Grafana in compose, scraping the fleet's `/actuator/prometheus`.
+  - **Prometheus** (`prometheus/prometheus.yml`, UI `http://localhost:9090`): one `heimcall` job, 8 static
+    targets (`localhost:8080`-`8087`) each tagged `service=<name>`; 15s scrape.
+  - **Grafana** (UI `http://localhost:3000`, admin/admin, anonymous Viewer on): auto-provisioned Prometheus
+    datasource (uid `prometheus`) + two dashboards in a "Heimcall" folder: **JVM & HTTP** (up, req-rate,
+    avg-latency, 5xx, heap, CPU) and **Domain Metrics** (incident triggered/ack/resolved, MTTA/MTTR via
+    `rate(sum)/rate(count)`, notification success/fail, `kafka_consumer_fetch_manager_records_lag_max`).
+  - **Why `network_mode: host`**: the services run on the host, and this dev box runs firewalld, which drops
+    docker-bridge->host packets — a bridged scraper + `host.docker.internal` times out (confirmed:
+    host->`172.18.0.1:8082` 200, container->same timeout). Host networking has Prometheus scrape
+    `localhost:808x` and Grafana read Prometheus at `localhost:9090` directly. Linux-only (fine for local dev).
+  - Verified: booted incident-service, Prometheus target `incident-service` UP, Grafana datasource proxy
+    resolves `incident_triggered_total{service=incident-service}`, both dashboards provisioned. Other 7
+    targets down only because not running (identical config).
 
 ### Kafka topics in use
 - `alert.received.v1` (integration-service -> incident-service) + `alert.received.v1.DLT`
@@ -421,8 +435,11 @@ restart all services off fresh jars to propagate (happy paths unaffected either 
 - T4b DONE - sync REST hops join the trace: all internal `RestClient`s + the webhook sender build from Boot's
   auto-configured `RestClient.Builder` (observation customizer), so they emit client spans + propagate
   `traceparent` (see §4 Observability). Verified integration -> identity + integration -> incident in one trace.
-- Remaining deliverables (plan §Phase 8 T4b+): Grafana dashboards, Kubernetes probe wiring + HPA,
-  Redis / PostgreSQL dashboards, runbooks.
+- T4c-1 DONE - Prometheus + Grafana in compose: scrape all 8 services' `/actuator/prometheus` + two
+  auto-provisioned dashboards (JVM/HTTP, Heimcall domain metrics). Host-networked (firewalld drops
+  bridge->host); see §4 Observability. Verified incident-service scraped UP + domain metric queried via Grafana.
+- Remaining deliverables (plan §Phase 8 T4c): Kubernetes probe wiring + HPA, Redis / PostgreSQL dashboards,
+  runbooks.
 
 Plus cross-cutting hardening still open (transactional outbox, Redis caches/cooldown, `processed_event`
 TTL, `reassign` + `IncidentAssignment`, JWT secret rotation/RS256).

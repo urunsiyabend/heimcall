@@ -1,0 +1,14 @@
+# Phase 8 T4c: load dashboard JSON from /var/lib/grafana/dashboards.
+apiVersion: 1
+
+providers:
+  - name: heimcall
+    orgId: 1
+    folder: Heimcall
+    type: file
+    disableDeletion: false
+    updateIntervalSeconds: 10
+    allowUiUpdates: true
+    options:
+      path: /var/lib/grafana/dashboards
+      foldersFromFilesStructure: false

@@ -1,0 +1,89 @@
+{
+  "annotations": { "list": [] },
+  "editable": true,
+  "schemaVersion": 39,
+  "title": "Heimcall — Domain Metrics",
+  "tags": ["heimcall", "domain"],
+  "time": { "from": "now-6h", "to": "now" },
+  "refresh": "15s",
+  "templating": { "list": [] },
+  "panels": [
+    {
+      "id": 1,
+      "title": "Incidents triggered (total)",
+      "type": "stat",
+      "gridPos": { "h": 5, "w": 6, "x": 0, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [ { "expr": "sum(incident_triggered_total{job=\"heimcall\"})", "legendFormat": "triggered" } ]
+    },
+    {
+      "id": 2,
+      "title": "Incidents acknowledged (total)",
+      "type": "stat",
+      "gridPos": { "h": 5, "w": 6, "x": 6, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [ { "expr": "sum(incident_acknowledged_total{job=\"heimcall\"})", "legendFormat": "acknowledged" } ]
+    },
+    {
+      "id": 3,
+      "title": "Incidents resolved (total)",
+      "type": "stat",
+      "gridPos": { "h": 5, "w": 6, "x": 12, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [ { "expr": "sum(incident_resolved_total{job=\"heimcall\"})", "legendFormat": "resolved" } ]
+    },
+    {
+      "id": 4,
+      "title": "Escalation tasks executed (total)",
+      "type": "stat",
+      "gridPos": { "h": 5, "w": 6, "x": 18, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [ { "expr": "sum(escalation_task_executed_total{job=\"heimcall\"})", "legendFormat": "executed" } ]
+    },
+    {
+      "id": 5,
+      "title": "Incident lifecycle rate (events/s)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 5 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        { "expr": "sum(rate(incident_triggered_total{job=\"heimcall\"}[5m]))", "legendFormat": "triggered" },
+        { "expr": "sum(rate(incident_acknowledged_total{job=\"heimcall\"}[5m]))", "legendFormat": "acknowledged" },
+        { "expr": "sum(rate(incident_resolved_total{job=\"heimcall\"}[5m]))", "legendFormat": "resolved" }
+      ]
+    },
+    {
+      "id": 6,
+      "title": "Mean time to ack / resolve (s)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 5 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
+      "targets": [
+        { "expr": "sum(rate(incident_time_to_ack_seconds_sum{job=\"heimcall\"}[30m])) / sum(rate(incident_time_to_ack_seconds_count{job=\"heimcall\"}[30m]))", "legendFormat": "time-to-ack" },
+        { "expr": "sum(rate(incident_time_to_resolve_seconds_sum{job=\"heimcall\"}[30m])) / sum(rate(incident_time_to_resolve_seconds_count{job=\"heimcall\"}[30m]))", "legendFormat": "time-to-resolve" }
+      ]
+    },
+    {
+      "id": 7,
+      "title": "Notification delivery rate (req/s)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 13 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        { "expr": "sum(rate(notification_delivery_success_total{job=\"heimcall\"}[5m]))", "legendFormat": "success" },
+        { "expr": "sum(rate(notification_delivery_failure_total{job=\"heimcall\"}[5m]))", "legendFormat": "failure" }
+      ]
+    },
+    {
+      "id": 8,
+      "title": "Kafka consumer lag (max records)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 13 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [ { "expr": "max by (service, client_id) (kafka_consumer_fetch_manager_records_lag_max{job=\"heimcall\"})", "legendFormat": "{{service}} / {{client_id}}" } ]
+    }
+  ],
+  "__inputs": [],
+  "__requires": []
+}

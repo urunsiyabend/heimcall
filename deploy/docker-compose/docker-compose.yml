@@ -70,5 +70,34 @@ services:
       - "4317:4317"     # OTLP gRPC
       - "4318:4318"     # OTLP HTTP (Boot's default exporter transport)
 
+  # Phase 8 T4c: metrics scraper. Scrapes the host-run services' /actuator/prometheus.
+  # network_mode: host so it reaches the services on localhost:808x directly. A firewalld host
+  # (the local dev box) drops docker-bridge->host packets, so bridge + host.docker.internal can't
+  # scrape host-run services; host networking sidesteps that. Linux-only (fine for local dev).
+  # Web UI -> http://localhost:9090
+  prometheus:
+    image: prom/prometheus:v2.53.0
+    network_mode: host
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+
+  # Phase 8 T4c: dashboards. Auto-provisioned Prometheus datasource + Heimcall dashboards.
+  # Login admin/admin (anonymous viewer also enabled). Web UI -> http://localhost:3000.
+  # network_mode: host so the datasource reaches Prometheus at localhost:9090 (same firewalld reason).
+  grafana:
+    image: grafana/grafana:11.1.0
+    network_mode: host
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafanadata:/var/lib/grafana
+    depends_on:
+      - prometheus
+
 volumes:
   pgdata:
+  grafanadata:

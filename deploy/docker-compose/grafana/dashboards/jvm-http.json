@@ -1,0 +1,65 @@
+{
+  "annotations": { "list": [] },
+  "editable": true,
+  "schemaVersion": 39,
+  "title": "Heimcall — JVM & HTTP",
+  "tags": ["heimcall", "jvm"],
+  "time": { "from": "now-1h", "to": "now" },
+  "refresh": "15s",
+  "templating": { "list": [] },
+  "panels": [
+    {
+      "id": 1,
+      "title": "Service up",
+      "type": "stat",
+      "gridPos": { "h": 6, "w": 8, "x": 0, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "mappings": [ { "type": "value", "options": { "0": { "text": "DOWN", "color": "red" }, "1": { "text": "UP", "color": "green" } } } ] }, "overrides": [] },
+      "targets": [ { "expr": "up{job=\"heimcall\"}", "legendFormat": "{{service}}" } ]
+    },
+    {
+      "id": 2,
+      "title": "HTTP request rate (req/s)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 16, "x": 8, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [ { "expr": "sum by (service) (rate(http_server_requests_seconds_count{job=\"heimcall\"}[1m]))", "legendFormat": "{{service}}" } ]
+    },
+    {
+      "id": 3,
+      "title": "HTTP avg latency (s)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [ { "expr": "sum by (service) (rate(http_server_requests_seconds_sum{job=\"heimcall\"}[1m])) / sum by (service) (rate(http_server_requests_seconds_count{job=\"heimcall\"}[1m]))", "legendFormat": "{{service}}" } ]
+    },
+    {
+      "id": 4,
+      "title": "HTTP 5xx rate (req/s)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [ { "expr": "sum by (service) (rate(http_server_requests_seconds_count{job=\"heimcall\", status=~\"5..\"}[1m]))", "legendFormat": "{{service}}" } ]
+    },
+    {
+      "id": 5,
+      "title": "JVM heap used (bytes)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 16 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "bytes" }, "overrides": [] },
+      "targets": [ { "expr": "sum by (service) (jvm_memory_used_bytes{job=\"heimcall\", area=\"heap\"})", "legendFormat": "{{service}}" } ]
+    },
+    {
+      "id": 6,
+      "title": "Process CPU usage",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 16 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "percentunit" }, "overrides": [] },
+      "targets": [ { "expr": "process_cpu_usage{job=\"heimcall\"}", "legendFormat": "{{service}}" } ]
+    }
+  ],
+  "__inputs": [],
+  "__requires": []
+}

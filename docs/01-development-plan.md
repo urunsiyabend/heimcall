@@ -872,8 +872,14 @@ kafka_consumer_lag
   `RestClient.Builder` bean per client. No yml/config change. Verified a single Jaeger trace spanning
   integration-service -> identity-service (`POST /v1/integration-keys/resolve`) plus the integration ->
   incident Kafka hop.
-- **T4c+ (later)** - Grafana dashboards, Kubernetes probes wiring + HPA, Redis / PostgreSQL dashboards,
-  runbooks.
+- **T4c-1 (DONE)** - Prometheus + Grafana stack in compose. Prometheus (`:9090`) scrapes all 8 services'
+  `/actuator/prometheus` (one `heimcall` job, static targets `localhost:8080`-`8087`, `service` label).
+  Grafana (`:3000`, admin/admin) auto-provisions a Prometheus datasource + two dashboards: JVM/HTTP and
+  Heimcall domain metrics (incident counters/timers, notification success/fail, kafka consumer lag). Both
+  containers `network_mode: host` because firewalld drops docker-bridge->host packets, so a bridged scraper
+  can't reach the host-run services (Linux-only; fine for local dev). Verified incident-service scraped UP +
+  domain metric queried through Grafana.
+- **T4c+ (later)** - Kubernetes probes wiring + HPA, Redis / PostgreSQL dashboards, runbooks.
 
 ## 10. Suggested Repository Structure
 

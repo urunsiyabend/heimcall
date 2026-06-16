@@ -1,0 +1,26 @@
+# Phase 8 T4c: scrapes the Heimcall fleet's actuator/prometheus endpoints.
+# Services run on the host (gradle bootRun / java -jar), reached via localhost.
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: heimcall
+    metrics_path: /actuator/prometheus
+    static_configs:
+      - targets: ["localhost:8080"]
+        labels: { service: api-gateway }
+      - targets: ["localhost:8081"]
+        labels: { service: integration-service }
+      - targets: ["localhost:8082"]
+        labels: { service: incident-service }
+      - targets: ["localhost:8083"]
+        labels: { service: identity-service }
+      - targets: ["localhost:8084"]
+        labels: { service: service-catalog-service }
+      - targets: ["localhost:8085"]
+        labels: { service: schedule-service }
+      - targets: ["localhost:8086"]
+        labels: { service: escalation-service }
+      - targets: ["localhost:8087"]
+        labels: { service: notification-service }
