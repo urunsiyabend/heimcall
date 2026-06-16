@@ -12,6 +12,9 @@
     <appender name="JSON" class="ch.qos.logback.core.ConsoleAppender">
         <encoder class="net.logstash.logback.encoder.LogstashEncoder">
             <includeMdcKeyName>correlationId</includeMdcKeyName>
+            <!-- Phase 8 T4: Micrometer Tracing's correlation listener stamps these into the MDC. -->
+            <includeMdcKeyName>traceId</includeMdcKeyName>
+            <includeMdcKeyName>spanId</includeMdcKeyName>
             <customFields>{"service":"${appName}"}</customFields>
             <fieldNames>
                 <timestamp>ts</timestamp>

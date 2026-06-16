@@ -60,5 +60,15 @@ services:
       - "1025:1025"   # SMTP
       - "8025:8025"   # web UI
 
+  # Phase 8 T4: trace backend. Services export OTLP/HTTP to :4318; view traces at http://localhost:16686.
+  jaeger:
+    image: jaegertracing/all-in-one:1.57
+    environment:
+      COLLECTOR_OTLP_ENABLED: "true"
+    ports:
+      - "16686:16686"   # web UI
+      - "4317:4317"     # OTLP gRPC
+      - "4318:4318"     # OTLP HTTP (Boot's default exporter transport)
+
 volumes:
   pgdata:

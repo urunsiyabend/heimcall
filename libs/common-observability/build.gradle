@@ -12,6 +12,13 @@ dependencies {
     // is already on each service. Micrometer auto-instruments JVM, HTTP, and Kafka-consumer lag.
     api 'io.micrometer:micrometer-registry-prometheus'
 
+    // Distributed tracing (Phase 8 T4): Micrometer Tracing -> OpenTelemetry bridge + OTLP exporter.
+    // Boot auto-configures the tracer, OTLP span exporter, and HTTP/WebFlux server+client spans by
+    // classpath presence; versions managed by the Spring Boot 3.3.5 BOM (imports opentelemetry-bom).
+    // api so the Tracer + OTel SDK reach every service depending on this lib.
+    api 'io.micrometer:micrometer-tracing-bridge-otel'
+    api 'io.opentelemetry:opentelemetry-exporter-otlp'
+
     implementation 'org.springframework.boot:spring-boot-autoconfigure'
     // HTTP correlation filter — servlet API only needed at compile time.
     compileOnly 'jakarta.servlet:jakarta.servlet-api'

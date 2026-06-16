@@ -13,6 +13,7 @@ import org.springframework.context.annotation.Configuration;
 import org.springframework.kafka.config.ConcurrentKafkaListenerContainerFactory;
 import org.springframework.kafka.core.DefaultKafkaConsumerFactory;
 import org.springframework.kafka.core.DefaultKafkaProducerFactory;
+import org.springframework.kafka.core.KafkaTemplate;
 import org.springframework.kafka.core.MicrometerConsumerListener;
 import org.springframework.kafka.core.MicrometerProducerListener;
 
@@ -51,6 +52,36 @@ public class HeimcallObservabilityAutoConfiguration {
                 public Object postProcessAfterInitialization(Object bean, String beanName) {
                     if (bean instanceof ConcurrentKafkaListenerContainerFactory factory) {
                         factory.setRecordInterceptor(new CorrelationRecordInterceptor());
+                    }
+                    return bean;
+                }
+            };
+        }
+    }
+
+    /**
+     * Phase 8 T4: enable Micrometer/OpenTelemetry observation on Kafka producers and listeners so each
+     * produce/consume becomes a span on the distributed trace. Spring Boot's
+     * {@code spring.kafka.{template,listener}.observation-enabled} flags only reach the template and
+     * container factory Boot auto-creates; every service here defines its own {@link KafkaTemplate} and
+     * {@link ConcurrentKafkaListenerContainerFactory} beans (DLT + events producers, custom listeners),
+     * so we flip observation on them directly via a {@link BeanPostProcessor}. Templates and containers
+     * pull the {@code ObservationRegistry} from the application context on start, joining HTTP-server
+     * spans into one trace across the {@code HTTP -> produce -> consume} hop. Gated on the tracer so this
+     * is inert until the OTel bridge is on the classpath.
+     */
+    @Configuration(proxyBeanMethods = false)
+    @ConditionalOnClass({io.micrometer.tracing.Tracer.class, ConcurrentKafkaListenerContainerFactory.class})
+    static class KafkaTracing {
+        @Bean
+        static BeanPostProcessor kafkaObservationPostProcessor() {
+            return new BeanPostProcessor() {
+                @Override
+                public Object postProcessAfterInitialization(Object bean, String beanName) {
+                    if (bean instanceof KafkaTemplate<?, ?> template) {
+                        template.setObservationEnabled(true);
+                    } else if (bean instanceof ConcurrentKafkaListenerContainerFactory<?, ?> factory) {
+                        factory.getContainerProperties().setObservationEnabled(true);
                     }
                     return bean;
                 }
