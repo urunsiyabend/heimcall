@@ -1,0 +1,24 @@
+// Shared transactional outbox (Phase 9): append a row in the same DB tx as the domain change, a
+// scheduled relay publishes it to Kafka with confirm. Auto-configures by being on the classpath
+// (mirrors common-security / common-observability). java-library so the appender/relay leak
+// transitively to consumers.
+apply plugin: 'java-library'
+
+dependencies {
+    implementation 'org.springframework.boot:spring-boot-autoconfigure'
+
+    // JdbcTemplate (no JPA @Entity, so the outbox table needs no cross-package @EntityScan), tx,
+    // scheduling, Kafka client + KafkaProperties, Jackson, and the tracer for traceparent capture.
+    // All compileOnly: every consuming service already brings them (data-jpa, spring-kafka,
+    // jackson via web, micrometer-tracing via common-observability).
+    compileOnly 'org.springframework:spring-jdbc'
+    compileOnly 'org.springframework:spring-tx'
+    compileOnly 'org.springframework:spring-context'
+    compileOnly 'org.springframework.kafka:spring-kafka'
+    compileOnly 'org.apache.kafka:kafka-clients'
+    compileOnly 'com.fasterxml.jackson.core:jackson-databind'
+    compileOnly 'io.micrometer:micrometer-tracing'
+    compileOnly 'org.slf4j:slf4j-api'
+
+    annotationProcessor 'org.springframework.boot:spring-boot-configuration-processor'
+}

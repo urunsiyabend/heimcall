@@ -900,6 +900,57 @@ kafka_consumer_lag
   `deploy/kind/`. Three real-deploy fixes (render hid them): stale `-plain.jar` glob, docker-29 multi-arch
   `kind load` digest error (node pulled directly), and `cp-kafka` KRaft opaque crash -> `apache/kafka:3.8.1`.
 
+## Phase 9 - Transactional Outbox
+
+Goal: make domain-event publication atomic with the DB write. Closes the last correctness gap left after
+Phase 8: every producing service either publishes on an `AFTER_COMMIT` listener (commit succeeds, then a
+crash or broker outage drops the event — **lost event**) or calls `KafkaTemplate.send` inside the
+`@Transactional` method (a later rollback leaves a **ghost event**, a post-commit send loss is a **lost
+event**). Consumers are already idempotent (`processed_event` / `notification_request` PK ledgers), so
+at-least-once delivery from a relay is safe; the missing half is never-lose / never-ghost on the producer.
+
+Pattern: in the same DB transaction as the domain change, INSERT an `outbox` row instead of publishing
+directly. A relay polls unpublished rows, publishes to Kafka with confirm, marks them `PUBLISHED`. Tx
+rolls back -> no row -> no ghost. Tx commits -> row exists -> the event is published eventually.
+
+Decisions locked (2026-06-16):
+- Published rows are **kept** (`status=PUBLISHED`) for audit/replay; a scheduled prune deletes rows older
+  than a retention window. (Mirrors integration-service's `raw_inbound_event` audit trail.)
+- Sliced per ticket; **T1 first** (shared lib + incident-service), verified + reviewed before T2/T3 are
+  specced.
+
+Shared lib `libs/common-outbox` (ships via one dependency + auto-config, like `common-security` /
+`common-observability`):
+- `OutboxRecord` entity + repository mapped to table `outbox` (id, aggregate_type, aggregate_id, topic,
+  msg_key, payload bytes, headers, status PENDING|PUBLISHED, created_at, published_at, attempts,
+  last_error).
+- `OutboxAppender` - called inside the service's `@Transactional` method; serializes the event to bytes +
+  captures headers (Kafka type-id, `X-Correlation-Id`, `traceparent`) so correlation/trace survive the
+  relay. Replaces the direct `KafkaTemplate.send`.
+- `OutboxRelay` - `@Scheduled` poller. `SELECT ... ORDER BY id FOR UPDATE SKIP LOCKED` (lock-safe per
+  §3.2, multi-instance ready), publishes sequentially (preserves per-aggregate order), confirms, marks
+  `PUBLISHED`; bounded retry, leaves `PENDING` + records `last_error` on failure.
+- `OutboxPrune` - `@Scheduled` delete of `PUBLISHED` rows older than the retention window.
+- The relay re-emits the raw value bytes + original headers, so existing type-header-based consumers
+  deserialize unchanged.
+- The `outbox` DDL ships as a documented snippet each service adds as its own next Flyway migration (libs
+  cannot own per-service migrations; database-per-service).
+
+### Ticket breakdown
+
+- **T1** - `libs/common-outbox` + wire **incident-service**. Drop the `KafkaTemplate.send` in
+  `IncidentEventPublisher`'s `AFTER_COMMIT` listener; append the 4 `incident.{triggered,acknowledged,
+  resolved,canceled}.v1` events to the outbox inside the lifecycle transaction instead. Flyway
+  `V5__outbox.sql`.
+  - Acceptance: trigger -> `outbox` row written in the same tx -> relay publishes -> escalation-service
+    consumes. Kill the relay between commit and publish, restart -> the event still lands (no loss). A
+    rolled-back lifecycle command writes no outbox row (no ghost). Correlation id + trace span survive the
+    relay hop.
+- **T2** (spec after T1) - **escalation-service** (`notification.requested.v1`) +
+  **notification-service** (`notification.delivered/failed.v1`) onto the outbox.
+- **T3** (spec after T1, optional) - **integration-service**: fold `raw_inbound_event`-confirm into the
+  outbox, or leave as-is (it already surfaces broker outage as 503, no silent loss). Decide at T3.
+
 ## 10. Suggested Repository Structure
 
 ```text

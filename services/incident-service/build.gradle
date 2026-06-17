@@ -7,6 +7,7 @@ dependencies {
     implementation 'org.springframework.boot:spring-boot-starter-actuator'
     implementation project(':libs:common-security')
     implementation project(':libs:common-observability')
+    implementation project(':libs:common-outbox')
     implementation 'org.springframework.kafka:spring-kafka'
     implementation 'org.flywaydb:flyway-core'
     runtimeOnly 'org.flywaydb:flyway-database-postgresql'

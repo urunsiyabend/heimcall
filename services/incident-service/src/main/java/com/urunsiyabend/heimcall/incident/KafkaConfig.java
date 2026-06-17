@@ -61,18 +61,9 @@ public class KafkaConfig {
         return new DefaultErrorHandler(recoverer, new FixedBackOff(RETRY_INTERVAL_MS, MAX_RETRIES));
     }
 
-    // Producer for outbound incident lifecycle events (incident.triggered/acknowledged/resolved).
-    // JSON with type-info headers so escalation-service can map each topic to its event type.
-    @Bean
-    public ProducerFactory<String, Object> eventsProducerFactory(KafkaProperties properties) {
-        return new DefaultKafkaProducerFactory<>(
-                properties.buildProducerProperties(null), new StringSerializer(), new JsonSerializer<>());
-    }
-
-    @Bean
-    public KafkaTemplate<String, Object> eventsKafkaTemplate(ProducerFactory<String, Object> eventsProducerFactory) {
-        return new KafkaTemplate<>(eventsProducerFactory);
-    }
+    // Outbound incident lifecycle events (incident.triggered/acknowledged/resolved/canceled) now go
+    // through the transactional outbox (Phase 9): IncidentEventPublisher appends them in the same tx as
+    // the incident change, and common-outbox's relay publishes them. No outbound KafkaTemplate here.
 
     // The default (Boot-autoconfigured) consumer pins every record to AlertReceivedEvent
     // (use.type.headers=false). notification.delivered/failed carry two distinct types on two

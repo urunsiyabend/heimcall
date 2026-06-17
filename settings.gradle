@@ -9,6 +9,7 @@ include 'libs:common-domain'
 include 'libs:common-events'
 include 'libs:common-security'
 include 'libs:common-observability'
+include 'libs:common-outbox'
 include 'libs:test-support'
 
 include 'services:api-gateway'

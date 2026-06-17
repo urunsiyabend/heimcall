@@ -2,7 +2,7 @@
 
 Living document. Update at the end of every sprint. Reflects what is actually built and running, not what is planned. Plan lives in `01-development-plan.md`; this file is the source of truth for "where are we now".
 
-Last updated: 2026-06-16 (Sprint 11 - Phase 8 T4a: OpenTelemetry distributed traces fleet-wide)
+Last updated: 2026-06-17 (Sprint 13 - Phase 9 T1: transactional outbox, incident-service)
 
 ## 1. Snapshot
 
@@ -11,7 +11,7 @@ Last updated: 2026-06-16 (Sprint 11 - Phase 8 T4a: OpenTelemetry distributed tra
 | Architecture | Microservices-first monorepo, Gradle multi-project |
 | Build | `./gradlew build` green on Java 21 |
 | Runtime verified | Sprint 9 Phase-7 tickets 1-3.1: full loop under real JWT through the gateway (register/login -> token -> CRUD across all services -> ingest -> incident TRIGGER + NOTIFIED), JWT enforced (401 no-token, refresh-as-access rejected, client X-User-Id spoof stripped), incident queries tenant-scoped (cross-org 403) |
-| Last sprint | Sprint 12 - Phase 8 T4b (sync REST hops join the trace: all internal `RestClient`s + webhook sender now use Boot's auto-configured `RestClient.Builder`, so they emit client spans + propagate `traceparent`). Verified one trace spanning integration -> identity (key resolve) + integration -> incident (Kafka). |
+| Last sprint | Sprint 13 - Phase 9 T1 (transactional outbox in `libs/common-outbox`; incident-service publishes `incident.*` via the outbox instead of an `AFTER_COMMIT` send). Verified on real Kafka/Postgres: trigger -> PENDING outbox row in the same tx -> process killed (row survives) -> restart -> relay drains it (PUBLISHED, topic +1), headers `__TypeId__`/correlation/`traceparent` intact. |
 | Tests | First automated test: `OnCallCalculatorTest` (rotation math) |
 | Auth | Real JWT (HS256, `libs/common-security`): identity issues access+refresh; every service validates Bearer and derives `X-User-Id` from the verified token. Header-context stub retired. |
 
@@ -32,6 +32,7 @@ libs/
   common-events      event records (Alert*, Incident triggered/acknowledged/resolved/canceled, Notification*), Topics constants
   common-security    HS256 JWT auto-config: JwtSupport (issue/verify), JwtAuthenticationFilter (Bearer -> principal + derives X-User-Id), stateless SecurityFilterChain. Added by every service via one dependency.
   common-observability  (Phase 8 T1-T4a) auto-config: logstash JSON logback, servlet CorrelationIdFilter (X-Correlation-Id in/out via MDC), Kafka CorrelationProducerInterceptor (stamps id on outbound records) + CorrelationRecordInterceptor (lifts id back into MDC on every listener); micrometer-registry-prometheus + native Kafka client metrics; (T4a) micrometer-tracing-bridge-otel + OTLP exporter, KafkaTracing BPP enabling observation on the services' own KafkaTemplate/listener factory beans, traceId/spanId in the JSON logs, TracingDefaultsEnvironmentPostProcessor (sampling + OTLP endpoint defaults). Added by every service via one dependency.
+  common-outbox     (Phase 9 T1) transactional outbox auto-config: OutboxAppender (JdbcTemplate INSERT into `outbox`, joins the caller's tx), OutboxRelay (@Scheduled FOR UPDATE SKIP LOCKED poll -> confirmed publish via a non-bean byte[] KafkaTemplate so the KafkaTracing BPP can't clobber the stored headers -> mark PUBLISHED), OutboxPrune (delete PUBLISHED past retention). Forwards `__TypeId__` + `X-Correlation-Id` + `traceparent`. Wired into incident-service so far.
   test-support       Testcontainers singletons (PG + Kafka) - not yet used
 services/
   api-gateway        Spring Cloud Gateway, routes -> catalog 8084, schedule 8085, escalation 8086, identity 8083 (incl. /v1/auth/**), integration 8081, incident 8082; CORS for the UI origin; forwards Authorization (validation is per-service)
@@ -140,11 +141,15 @@ Ports: api-gateway 8080, integration 8081, incident 8082, identity 8083, service
 - Routing/ownership stamping (Phase 5): on a new trigger, `CatalogClient` resolves the routingKey to
   `{serviceId, escalationPolicyId}` and stamps them (Flyway V3). Best-effort: a missing mapping / catalog
   error / unreachable catalog still creates the incident (`NO_POLICY` timeline event); core never depends on it.
-- Domain events: publishes `incident.triggered/acknowledged/resolved/canceled.v1` via a
-  `@TransactionalEventListener` (`AFTER_COMMIT`) so a rolled-back change emits no ghost event. At-least-once.
-- Persistence (Flyway V1-V4): `incident` (`alert_count` dropped in V4; still carries `routing_key`,
+- Domain events (Phase 9 T1, transactional outbox): `IncidentEventPublisher` is now a synchronous
+  `@EventListener` that appends `incident.triggered/acknowledged/resolved/canceled.v1` to the `outbox`
+  table inside the lifecycle transaction (via `common-outbox`'s `OutboxAppender`); `common-outbox`'s
+  relay publishes them. A rolled-back change writes no row (no ghost); a committed one is never lost
+  (the prior `AFTER_COMMIT` `KafkaTemplate.send` could drop on a crash/broker-outage). At-least-once;
+  consumers idempotent. The old `events*` producer beans in `KafkaConfig` were removed.
+- Persistence (Flyway V1-V5): `incident` (`alert_count` dropped in V4; still carries `routing_key`,
   `service_id`, `escalation_policy_id`, `dedup_key`/`source`/`external_entity_id`), `incident_timeline_event`,
-  `alert`, `alert_occurrence`
+  `alert`, `alert_occurrence`, `outbox` (V5: id BIGINT identity, topic/key/payload/headers/status, PENDING->PUBLISHED)
   - Incident-level partial unique index `(organization_id, dedup_key) WHERE status IN (TRIGGERED, ACKNOWLEDGED)`
     kept as a backstop alongside the alert-level open-dedup index.
 - Notification feedback loop (Phase 7 ticket 1): a second `@KafkaListener` (group
@@ -328,7 +333,7 @@ Sprint 2: idempotency, DLT, broker-outage 503. Sprint 1: dedup, recovery, timeli
 | `reassign` endpoint + `IncidentAssignment` model | later |
 | Incident not fully leaned: still carries `dedup_key`/`source`/`external_entity_id` + backstop open-dedup index | later |
 | `processed_event` ledger has no TTL/pruning (grows unbounded) | later |
-| Transactional outbox; incident.* + notification.* publish is at-least-once, no outbox | later |
+| ~~Transactional outbox~~ incident-service DONE (Phase 9 T1, `common-outbox`). escalation.* (`notification.requested`) + notification.* (`delivered/failed`) still direct in-tx sends | Phase 9 T2 |
 | Routing is a flat `routingKey -> service` map; no Opsgenie-style rule engine (labels/severity/time) | later |
 | TEAM target fan-out built (identity member list) but not runtime-exercised (USER + SCHEDULE were) | ongoing |
 | Telegram channel (only EMAIL + WEBHOOK built) | later |
@@ -486,5 +491,21 @@ restart all services off fresh jars to propagate (happy paths unaffected either 
 
 **Phase 8 complete** (T1-T4c+).
 
-Plus cross-cutting hardening still open (transactional outbox, Redis caches/cooldown, `processed_event`
-TTL, `reassign` + `IncidentAssignment`, JWT secret rotation/RS256).
+**Phase 9 - Transactional Outbox** (in progress):
+- T1 DONE - `libs/common-outbox` (auto-config: `OutboxAppender` / `OutboxRelay` / `OutboxPrune`) + wired into
+  incident-service. `IncidentEventPublisher` now appends the 4 `incident.*` events to the `outbox` table
+  inside the lifecycle tx (synchronous `@EventListener`) instead of an `AFTER_COMMIT` `KafkaTemplate.send`;
+  the relay polls (`FOR UPDATE SKIP LOCKED`), publishes with confirm via a non-bean byte[] template (so the
+  observability `KafkaTracing` BPP can't enable observation and overwrite the stored `traceparent`), marks
+  `PUBLISHED`; published rows kept for audit and pruned past `heimcall.outbox.prune.retention` (P7D).
+  Flyway `V5__outbox.sql`. Verified on real Kafka/Postgres: trigger -> PENDING row written in the same tx;
+  process killed (relay parked) -> row survives; restart -> relay drains it (PUBLISHED, attempts=1, topic
+  +1, no dup); published record carries `__TypeId__` + `X-Correlation-Id` + `traceparent` (matching the
+  triggering log's trace/span), byte-identical to the old `JsonSerializer` form so consumers are unchanged.
+  No-ghost-on-rollback is structural (same-tx `JdbcTemplate` INSERT).
+- T2 (next, to be specced) - escalation-service (`notification.requested`) + notification-service
+  (`notification.delivered/failed`) onto the outbox.
+- T3 (optional) - integration-service: fold `raw_inbound_event`-confirm into the outbox, or leave as-is.
+
+Plus cross-cutting hardening still open (Redis caches/cooldown, `processed_event` TTL,
+`reassign` + `IncidentAssignment`, JWT secret rotation/RS256).
