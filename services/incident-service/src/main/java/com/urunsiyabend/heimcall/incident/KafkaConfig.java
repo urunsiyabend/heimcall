@@ -21,6 +21,7 @@ import org.springframework.kafka.support.serializer.JsonDeserializer;
 import org.springframework.kafka.support.serializer.JsonSerializer;
 import org.springframework.util.backoff.FixedBackOff;
 
+import java.util.LinkedHashMap;
 import java.util.Map;
 
 /**
@@ -31,6 +32,14 @@ import java.util.Map;
  * {@code alert.received.v1.DLT} so the partition is never blocked. The DLT producer uses a
  * delegating serializer: JSON for live events, raw bytes for the original payload of a
  * record that failed deserialization.
+ *
+ * <p>The delegating serializer matches by {@code isAssignableFrom} (assignable=true) over an ordered
+ * map (byte[] first), so a record that failed <em>application</em> processing — its value already
+ * deserialized to an event object (e.g. a routing-unavailable retry exhaustion, Phase 10) — is
+ * JSON-serialized via the {@code Object} delegate, while a poison-pill (raw byte[], deserialization
+ * failure) still takes the {@code byte[]} delegate. Exact-match (the prior default) only handled the
+ * poison-pill case and threw {@code SerializationException} on any deserialized-object value, which
+ * silently broke dead-lettering for every application exception.
  */
 @Configuration
 public class KafkaConfig {
@@ -42,12 +51,16 @@ public class KafkaConfig {
     @Bean
     public ProducerFactory<String, Object> dltProducerFactory(KafkaProperties properties) {
         Map<String, Object> config = properties.buildProducerProperties(null);
+        // Ordered (byte[] checked before Object) + assignable matching: a deserialized event object
+        // matches Object -> JSON; a raw poison-pill byte[] matches byte[] -> raw. Map.of order is
+        // undefined, so a LinkedHashMap is required to keep byte[] ahead of the Object catch-all.
+        Map<Class<?>, org.apache.kafka.common.serialization.Serializer<?>> delegates = new LinkedHashMap<>();
+        delegates.put(byte[].class, new ByteArraySerializer());
+        delegates.put(Object.class, new JsonSerializer<>());
         return new DefaultKafkaProducerFactory<>(
                 config,
                 new StringSerializer(),
-                new DelegatingByTypeSerializer(Map.of(
-                        byte[].class, new ByteArraySerializer(),
-                        Object.class, new JsonSerializer<>())));
+                new DelegatingByTypeSerializer(delegates, true));
     }
 
     @Bean
