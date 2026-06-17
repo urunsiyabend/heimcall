@@ -16,9 +16,9 @@ import com.urunsiyabend.heimcall.escalation.domain.EscalationTaskRepository;
 import com.urunsiyabend.heimcall.escalation.domain.ProcessedEvent;
 import com.urunsiyabend.heimcall.escalation.domain.ProcessedEventRepository;
 import com.urunsiyabend.heimcall.escalation.domain.TaskStatus;
+import com.urunsiyabend.heimcall.common.outbox.OutboxAppender;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.kafka.core.KafkaTemplate;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -47,7 +47,7 @@ public class EscalationService {
     private final ProcessedEventRepository processedEvents;
     private final IdentityClient identity;
     private final ScheduleClient schedule;
-    private final KafkaTemplate<String, Object> eventsKafkaTemplate;
+    private final OutboxAppender outbox;
     // Phase 8 T2: escalation_task_executed_total.
     private final io.micrometer.core.instrument.Counter taskExecuted;
 
@@ -55,7 +55,7 @@ public class EscalationService {
                              EscalationRuleTargetRepository targets, EscalationTaskRepository tasks,
                              EscalationIncidentRepository incidents, ProcessedEventRepository processedEvents,
                              IdentityClient identity, ScheduleClient schedule,
-                             KafkaTemplate<String, Object> eventsKafkaTemplate,
+                             OutboxAppender outbox,
                              io.micrometer.core.instrument.MeterRegistry registry) {
         this.policies = policies;
         this.rules = rules;
@@ -65,7 +65,7 @@ public class EscalationService {
         this.processedEvents = processedEvents;
         this.identity = identity;
         this.schedule = schedule;
-        this.eventsKafkaTemplate = eventsKafkaTemplate;
+        this.outbox = outbox;
         this.taskExecuted = registry.counter("escalation.task.executed");
     }
 
@@ -165,7 +165,8 @@ public class EscalationService {
             NotificationRequestedEvent payload = new NotificationRequestedEvent(UUID.randomUUID(), now,
                     task.getOrganizationId(), task.getIncidentId(), task.getPolicyId(), task.getLevel(),
                     userId, source, title, severity);
-            eventsKafkaTemplate.send(Topics.NOTIFICATION_REQUESTED, task.getIncidentId().toString(), payload);
+            outbox.append("escalation", task.getIncidentId().toString(), Topics.NOTIFICATION_REQUESTED,
+                    task.getIncidentId().toString(), payload);
         });
         task.markExecuted(now);
         tasks.save(task);

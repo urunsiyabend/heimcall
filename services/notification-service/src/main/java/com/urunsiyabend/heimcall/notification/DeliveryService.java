@@ -10,12 +10,12 @@ import com.urunsiyabend.heimcall.notification.domain.NotificationDeliveryReposit
 import com.urunsiyabend.heimcall.notification.domain.NotificationRequest;
 import com.urunsiyabend.heimcall.notification.domain.NotificationRequestRepository;
 import com.urunsiyabend.heimcall.notification.sender.NotificationSender;
+import com.urunsiyabend.heimcall.common.outbox.OutboxAppender;
 import io.micrometer.core.instrument.Counter;
 import io.micrometer.core.instrument.MeterRegistry;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
-import org.springframework.kafka.core.KafkaTemplate;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -37,7 +37,7 @@ public class DeliveryService {
 
     private final NotificationDeliveryRepository deliveries;
     private final NotificationRequestRepository requests;
-    private final KafkaTemplate<String, Object> eventsKafkaTemplate;
+    private final OutboxAppender outbox;
     private final Map<NotificationChannel, NotificationSender> senders = new EnumMap<>(NotificationChannel.class);
     private final int maxAttempts;
     private final long retryBackoffMs;
@@ -46,13 +46,13 @@ public class DeliveryService {
     private final Counter deliveryFailure;
 
     public DeliveryService(NotificationDeliveryRepository deliveries, NotificationRequestRepository requests,
-                           KafkaTemplate<String, Object> eventsKafkaTemplate, List<NotificationSender> senderList,
+                           OutboxAppender outbox, List<NotificationSender> senderList,
                            MeterRegistry registry,
                            @Value("${notification.delivery.max-attempts:3}") int maxAttempts,
                            @Value("${notification.delivery.retry-backoff-ms:10000}") long retryBackoffMs) {
         this.deliveries = deliveries;
         this.requests = requests;
-        this.eventsKafkaTemplate = eventsKafkaTemplate;
+        this.outbox = outbox;
         senderList.forEach(s -> senders.put(s.channel(), s));
         this.maxAttempts = maxAttempts;
         this.retryBackoffMs = retryBackoffMs;
@@ -86,7 +86,8 @@ public class DeliveryService {
             delivery.markDelivered(now);
             deliveries.save(delivery);
             deliverySuccess.increment();
-            eventsKafkaTemplate.send(Topics.NOTIFICATION_DELIVERED, delivery.getIncidentId().toString(),
+            outbox.append("notification", delivery.getIncidentId().toString(), Topics.NOTIFICATION_DELIVERED,
+                    delivery.getIncidentId().toString(),
                     new NotificationDeliveredEvent(UUID.randomUUID(), now, delivery.getOrganizationId(),
                             delivery.getIncidentId(), delivery.getRecipientUserId(), delivery.getChannel().name(),
                             delivery.getDestination(), delivery.getRequestEventId()));
@@ -113,7 +114,8 @@ public class DeliveryService {
         delivery.markFailed(reason, now);
         deliveries.save(delivery);
         deliveryFailure.increment();
-        eventsKafkaTemplate.send(Topics.NOTIFICATION_FAILED, delivery.getIncidentId().toString(),
+        outbox.append("notification", delivery.getIncidentId().toString(), Topics.NOTIFICATION_FAILED,
+                delivery.getIncidentId().toString(),
                 new NotificationFailedEvent(UUID.randomUUID(), now, delivery.getOrganizationId(),
                         delivery.getIncidentId(), delivery.getRecipientUserId(), delivery.getChannel().name(),
                         delivery.getDestination(), delivery.getAttempts(), reason, delivery.getRequestEventId()));

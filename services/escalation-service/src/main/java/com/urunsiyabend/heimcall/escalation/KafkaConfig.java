@@ -19,7 +19,8 @@ import java.util.Map;
 /**
  * Consumer resilience: bounded retry then dead-letter, mirroring incident-service (Phase 3.5).
  * A failed incident event is retried, then routed to {@code <topic>.DLT} so the partition is never
- * blocked. Also configures the producer for outbound {@code notification.requested.v1} events.
+ * blocked. Outbound {@code notification.requested.v1} events go through the transactional outbox
+ * (Phase 9 T2), not a producer bean here.
  */
 @Configuration
 public class KafkaConfig {
@@ -46,17 +47,5 @@ public class KafkaConfig {
     public DefaultErrorHandler errorHandler(KafkaTemplate<String, Object> dltKafkaTemplate) {
         DeadLetterPublishingRecoverer recoverer = new DeadLetterPublishingRecoverer(dltKafkaTemplate);
         return new DefaultErrorHandler(recoverer, new FixedBackOff(RETRY_INTERVAL_MS, MAX_RETRIES));
-    }
-
-    // Outbound notification.requested.v1 events. JSON with type-info headers.
-    @Bean
-    public ProducerFactory<String, Object> eventsProducerFactory(KafkaProperties properties) {
-        return new DefaultKafkaProducerFactory<>(
-                properties.buildProducerProperties(null), new StringSerializer(), new JsonSerializer<>());
-    }
-
-    @Bean
-    public KafkaTemplate<String, Object> eventsKafkaTemplate(ProducerFactory<String, Object> eventsProducerFactory) {
-        return new KafkaTemplate<>(eventsProducerFactory);
     }
 }

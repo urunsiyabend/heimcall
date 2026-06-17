@@ -2,7 +2,7 @@
 
 Living document. Update at the end of every sprint. Reflects what is actually built and running, not what is planned. Plan lives in `01-development-plan.md`; this file is the source of truth for "where are we now".
 
-Last updated: 2026-06-17 (Sprint 13 - Phase 9 T1: transactional outbox, incident-service)
+Last updated: 2026-06-17 (Sprint 13 - Phase 9 T1+T2: transactional outbox on incident/escalation/notification)
 
 ## 1. Snapshot
 
@@ -503,8 +503,19 @@ restart all services off fresh jars to propagate (happy paths unaffected either 
   +1, no dup); published record carries `__TypeId__` + `X-Correlation-Id` + `traceparent` (matching the
   triggering log's trace/span), byte-identical to the old `JsonSerializer` form so consumers are unchanged.
   No-ghost-on-rollback is structural (same-tx `JdbcTemplate` INSERT).
-- T2 (next, to be specced) - escalation-service (`notification.requested`) + notification-service
-  (`notification.delivered/failed`) onto the outbox.
+- T2 DONE - escalation-service (`notification.requested`) + notification-service
+  (`notification.delivered` / `notification.failed`) onto the same `common-outbox`. No new mechanism — each
+  service gets the lib dep + its own `V2__outbox.sql` (table identical to incident `V5`); the inline
+  `eventsKafkaTemplate.send(...)` calls (already inside `@Transactional` `fireDueTask` / `fireDelivery`)
+  become `outboxAppender.append(...)` on the tx-bound connection — no separate `@EventListener` indirection
+  needed here (unlike T1, where the publish was `AFTER_COMMIT`). Dead `eventsProducerFactory` /
+  `eventsKafkaTemplate` beans removed from both `KafkaConfig`s (DLT beans untouched). Relay/prune come from
+  the lib auto-config. Verified end-to-end on the full 8-service fleet (bootJars) through the gateway with
+  real JWT: CRITICAL ingest -> incident TRIGGERED -> escalation task (delay 0) fired -> notification
+  delivered -> EMAIL in mailhog; all three outbox tables (incident/escalation/notification) drained
+  naturally to PUBLISHED, every row attempts=1 (no dup), `__TypeId__` + `traceparent` headers intact. No-loss
+  across relay downtime re-confirmed: a hand-inserted PENDING row (a committed-but-unrelayed event) is
+  drained on the next poll.
 - T3 (optional) - integration-service: fold `raw_inbound_event`-confirm into the outbox, or leave as-is.
 
 Plus cross-cutting hardening still open (Redis caches/cooldown, `processed_event` TTL,
