@@ -11,9 +11,10 @@ import java.time.Instant;
 import java.util.UUID;
 
 /**
- * Durable record of a raw inbound webhook payload, written before the Kafka publish.
- * Acts as a lightweight outbox/audit log: a publish failure leaves a FAILED row that
- * carries the original payload for inspection and replay.
+ * Durable audit record of a raw inbound webhook payload, written in the same transaction as the
+ * outbox row that carries the normalized event (Phase 9 T3). Captures what arrived at the door (the
+ * un-normalized {@link com.urunsiyabend.heimcall.integration.web.WebhookRequest}) for inspection and
+ * replay. Rows stay {@code RECEIVED}: publish status now lives on the {@code outbox} row, not here.
  */
 @Entity
 @Table(name = "raw_inbound_event")

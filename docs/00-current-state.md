@@ -2,7 +2,7 @@
 
 Living document. Update at the end of every sprint. Reflects what is actually built and running, not what is planned. Plan lives in `01-development-plan.md`; this file is the source of truth for "where are we now".
 
-Last updated: 2026-06-17 (Sprint 13 - Phase 9 T1+T2: transactional outbox on incident/escalation/notification)
+Last updated: 2026-06-17 (Sprint 14 - Phase 9 T3: transactional outbox on integration-service; ingest 202 = durably accepted + returns dedupKey)
 
 ## 1. Snapshot
 
@@ -11,7 +11,7 @@ Last updated: 2026-06-17 (Sprint 13 - Phase 9 T1+T2: transactional outbox on inc
 | Architecture | Microservices-first monorepo, Gradle multi-project |
 | Build | `./gradlew build` green on Java 21 |
 | Runtime verified | Sprint 9 Phase-7 tickets 1-3.1: full loop under real JWT through the gateway (register/login -> token -> CRUD across all services -> ingest -> incident TRIGGER + NOTIFIED), JWT enforced (401 no-token, refresh-as-access rejected, client X-User-Id spoof stripped), incident queries tenant-scoped (cross-org 403) |
-| Last sprint | Sprint 13 - Phase 9 T1 (transactional outbox in `libs/common-outbox`; incident-service publishes `incident.*` via the outbox instead of an `AFTER_COMMIT` send). Verified on real Kafka/Postgres: trigger -> PENDING outbox row in the same tx -> process killed (row survives) -> restart -> relay drains it (PUBLISHED, topic +1), headers `__TypeId__`/correlation/`traceparent` intact. |
+| Last sprint | Sprint 14 - Phase 9 T3 (integration-service onto `common-outbox`). `AlertNormalizer` is now `@Transactional`: the `raw_inbound_event` audit row + the normalized `alert.received.v1` event are written in one tx and the relay publishes async, replacing the old synchronous `acks=all` send. **Contract change:** a broker outage no longer 503s the caller — a 202 now means "durably accepted", not "published". The 202 body returns `{status, eventId, dedupKey}` (PagerDuty-style `dedup_key` correlation handle). All four producing services (incident/escalation/notification/integration) now publish via the outbox. |
 | Tests | First automated test: `OnCallCalculatorTest` (rotation math) |
 | Auth | Real JWT (HS256, `libs/common-security`): identity issues access+refresh; every service validates Bearer and derives `X-User-Id` from the verified token. Header-context stub retired. |
 
@@ -32,7 +32,8 @@ libs/
   common-events      event records (Alert*, Incident triggered/acknowledged/resolved/canceled, Notification*), Topics constants
   common-security    HS256 JWT auto-config: JwtSupport (issue/verify), JwtAuthenticationFilter (Bearer -> principal + derives X-User-Id), stateless SecurityFilterChain. Added by every service via one dependency.
   common-observability  (Phase 8 T1-T4a) auto-config: logstash JSON logback, servlet CorrelationIdFilter (X-Correlation-Id in/out via MDC), Kafka CorrelationProducerInterceptor (stamps id on outbound records) + CorrelationRecordInterceptor (lifts id back into MDC on every listener); micrometer-registry-prometheus + native Kafka client metrics; (T4a) micrometer-tracing-bridge-otel + OTLP exporter, KafkaTracing BPP enabling observation on the services' own KafkaTemplate/listener factory beans, traceId/spanId in the JSON logs, TracingDefaultsEnvironmentPostProcessor (sampling + OTLP endpoint defaults). Added by every service via one dependency.
-  common-outbox     (Phase 9 T1) transactional outbox auto-config: OutboxAppender (JdbcTemplate INSERT into `outbox`, joins the caller's tx), OutboxRelay (@Scheduled FOR UPDATE SKIP LOCKED poll -> confirmed publish via a non-bean byte[] KafkaTemplate so the KafkaTracing BPP can't clobber the stored headers -> mark PUBLISHED), OutboxPrune (delete PUBLISHED past retention). Forwards `__TypeId__` + `X-Correlation-Id` + `traceparent`. Wired into incident-service so far.
+  common-outbox     (Phase 9 T1) transactional outbox auto-config: OutboxAppender (JdbcTemplate INSERT into `outbox`, joins the caller's tx), OutboxRelay (@Scheduled FOR UPDATE SKIP LOCKED poll -> confirmed publish via a non-bean byte[] KafkaTemplate so the KafkaTracing BPP can't clobber the stored headers -> mark PUBLISHED), OutboxPrune (delete PUBLISHED past retention). Forwards `__TypeId__` + `X-Correlation-Id` + `traceparent`. Wired into all four producing services:
+    incident (T1), escalation + notification (T2), integration (T3).
   test-support       Testcontainers singletons (PG + Kafka) - not yet used
 services/
   api-gateway        Spring Cloud Gateway, routes -> catalog 8084, schedule 8085, escalation 8086, identity 8083 (incl. /v1/auth/**), integration 8081, incident 8082; CORS for the UI origin; forwards Authorization (validation is per-service)
@@ -105,16 +106,21 @@ Ports: api-gateway 8080, integration 8081, incident 8082, identity 8083, service
   -> 200 `{userId, source, rotationId}` or 204 if no one on call. Used by escalation-service to resolve SCHEDULE targets.
 
 ### integration-service (port 8081)
-- `POST /v1/integrations/{integrationKey}/events/{routingKey}` -> 202 accepted + eventId
+- `POST /v1/integrations/{integrationKey}/events/{routingKey}` -> **202** `{status, eventId, dedupKey}`.
+  Following PagerDuty's Events API v2, `dedupKey` (= `source + ":" + entityId`) is returned as the alert
+  correlation handle the caller reuses for follow-up ACK/RECOVERY; `eventId` is the per-request /
+  idempotency handle. A 202 means **durably accepted** (the relay will publish it), not "published to Kafka".
 - Resolves the integration key via identity-service (`IdentityClient`, sync REST). Invalid key -> **401**;
-  identity unreachable -> **503** (cannot validate, so nothing is published). Dev placeholder org is gone.
+  identity unreachable -> **503** (cannot validate, so nothing is stored). Dev placeholder org is gone.
 - Validates payload (`messageType`, `entityId`, `source` required)
 - Normalizes to `AlertReceivedEvent` with the resolved `organizationId` + `integrationId`,
   `dedupKey = source + ":" + entityId`
-- Stores the raw payload (`raw_inbound_event`, Flyway V1) before publishing - audit + replay trace
-- Publishes to Kafka topic `alert.received.v1` (key = dedupKey) with `acks=all` + idempotent producer,
-  confirmed synchronously (10s timeout). On a confirmed write the raw row is marked `PUBLISHED`.
-- If the publish is not confirmed: raw row marked `FAILED` with the error, request returns **503** (no silent loss)
+- **Transactional outbox (Phase 9 T3)**: `AlertNormalizer` is `@Transactional` — the raw audit row
+  (`raw_inbound_event`, Flyway V1; now pure inbound audit, always `RECEIVED`) and the normalized event
+  (`outbox.append`, Flyway V2) are written in one tx; `common-outbox`'s relay publishes `alert.received.v1`
+  (key = dedupKey) to Kafka with confirm. No ghost on rollback, no loss after commit. The old synchronous
+  `acks=all` `KafkaTemplate.send` + `EventPublishException`/503-on-publish-failure are gone: a broker outage
+  now just leaves the row PENDING (drained on recovery) instead of 503ing the caller.
 
 ### incident-service (port 8082)
 - `@KafkaListener` on `alert.received.v1`
@@ -333,7 +339,7 @@ Sprint 2: idempotency, DLT, broker-outage 503. Sprint 1: dedup, recovery, timeli
 | `reassign` endpoint + `IncidentAssignment` model | later |
 | Incident not fully leaned: still carries `dedup_key`/`source`/`external_entity_id` + backstop open-dedup index | later |
 | `processed_event` ledger has no TTL/pruning (grows unbounded) | later |
-| ~~Transactional outbox~~ incident-service DONE (Phase 9 T1, `common-outbox`). escalation.* (`notification.requested`) + notification.* (`delivered/failed`) still direct in-tx sends | Phase 9 T2 |
+| ~~Transactional outbox~~ DONE on all four producers via `common-outbox`: incident (T1), escalation + notification (T2), integration (T3) | Phase 9 complete |
 | Routing is a flat `routingKey -> service` map; no Opsgenie-style rule engine (labels/severity/time) | later |
 | TEAM target fan-out built (identity member list) but not runtime-exercised (USER + SCHEDULE were) | ongoing |
 | Telegram channel (only EMAIL + WEBHOOK built) | later |
@@ -491,7 +497,7 @@ restart all services off fresh jars to propagate (happy paths unaffected either 
 
 **Phase 8 complete** (T1-T4c+).
 
-**Phase 9 - Transactional Outbox** (in progress):
+**Phase 9 - Transactional Outbox** (complete):
 - T1 DONE - `libs/common-outbox` (auto-config: `OutboxAppender` / `OutboxRelay` / `OutboxPrune`) + wired into
   incident-service. `IncidentEventPublisher` now appends the 4 `incident.*` events to the `outbox` table
   inside the lifecycle tx (synchronous `@EventListener`) instead of an `AFTER_COMMIT` `KafkaTemplate.send`;
@@ -516,7 +522,21 @@ restart all services off fresh jars to propagate (happy paths unaffected either 
   naturally to PUBLISHED, every row attempts=1 (no dup), `__TypeId__` + `traceparent` headers intact. No-loss
   across relay downtime re-confirmed: a hand-inserted PENDING row (a committed-but-unrelayed event) is
   drained on the next poll.
-- T3 (optional) - integration-service: fold `raw_inbound_event`-confirm into the outbox, or leave as-is.
+- T3 DONE - integration-service onto `common-outbox`. The ingest publish was the odd one out — *synchronous*
+  (`acks=all`, broker outage -> 503), not an in-tx/AFTER_COMMIT send. Now `AlertNormalizer` is
+  `@Transactional`: the `raw_inbound_event` audit row + the normalized `alert.received.v1` event are written
+  in one tx (raw + `outbox.append`) and the relay publishes async. **Contract change (approved):** a broker
+  outage no longer 503s the webhook caller — a **202 = "durably accepted"**, not "published to Kafka" (the
+  relay drains the PENDING row on recovery). `raw_inbound_event` is now pure inbound audit (always
+  `RECEIVED`; publish status moved to the outbox row). Following PagerDuty's Events API v2, the 202 body
+  returns `{status, eventId, dedupKey}` — `dedupKey` is the alert correlation handle for follow-up
+  ACK/RECOVERY. `EventPublishException` + the sync `KafkaTemplate` send removed. Flyway `V2__outbox.sql`.
+  Verified on real Kafka/Postgres (identity + integration booted): ingest -> 202 `{status, eventId,
+  dedupKey}` -> `outbox` row -> relay PUBLISHED (attempts=1, `__TypeId__`/correlation/`traceparent` intact)
+  -> `alert.received.v1` carries the byte-correct message; `raw_inbound_event` `RECEIVED`. No-loss across
+  relay downtime is the same lib relay verified in T1/T2.
+
+**Phase 9 complete** (T1-T3): all four producing services publish domain events via the transactional outbox.
 
 Plus cross-cutting hardening still open (Redis caches/cooldown, `processed_event` TTL,
 `reassign` + `IncidentAssignment`, JWT secret rotation/RS256).

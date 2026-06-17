@@ -948,8 +948,19 @@ Shared lib `libs/common-outbox` (ships via one dependency + auto-config, like `c
     relay hop.
 - **T2** (spec after T1) - **escalation-service** (`notification.requested.v1`) +
   **notification-service** (`notification.delivered/failed.v1`) onto the outbox.
-- **T3** (spec after T1, optional) - **integration-service**: fold `raw_inbound_event`-confirm into the
-  outbox, or leave as-is (it already surfaces broker outage as 503, no silent loss). Decide at T3.
+- **T3 (DONE)** - **integration-service** onto the outbox. The ingest publish was *synchronous* (block on
+  `acks=all`, broker outage -> 503) rather than an `AFTER_COMMIT`/in-tx send, so it had no silent loss
+  already — but it was the odd one out and coupled ingestion to broker health. Now `AlertNormalizer` is
+  `@Transactional`: the `raw_inbound_event` audit row and the normalized `alert.received.v1` event are
+  written in one tx (raw + `outbox.append`), and the relay publishes async. **Contract change (approved):**
+  a broker outage no longer 503s the caller — a **202 now means "durably accepted", not "published to
+  Kafka"** (relay drains the row when the broker is back). `raw_inbound_event` stays as pure inbound audit
+  (always `RECEIVED`; publish status moved to the outbox row). The sync `KafkaTemplate` send +
+  `EventPublishException` are gone. Following PagerDuty's Events API v2 (`dedup_key` in the 202 body), the
+  202 now returns `{status, eventId, dedupKey}` — `dedupKey` is the alert correlation handle for follow-up
+  ACK/RECOVERY. Flyway `V2__outbox.sql`. Verified on real Kafka/Postgres: ingest -> 202 with eventId+dedupKey
+  -> `outbox` PENDING -> relay PUBLISHED (attempts=1, `__TypeId__`/correlation/`traceparent` intact) ->
+  `alert.received.v1` carries the byte-correct message; `raw_inbound_event` RECEIVED.
 
 ## 10. Suggested Repository Structure
 

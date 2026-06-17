@@ -4,66 +4,65 @@ import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.urunsiyabend.heimcall.common.events.AlertReceivedEvent;
 import com.urunsiyabend.heimcall.common.events.Topics;
+import com.urunsiyabend.heimcall.common.outbox.OutboxAppender;
 import com.urunsiyabend.heimcall.integration.domain.RawInboundEvent;
 import com.urunsiyabend.heimcall.integration.domain.RawInboundEventRepository;
 import com.urunsiyabend.heimcall.integration.web.WebhookRequest;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
-import org.springframework.kafka.core.KafkaTemplate;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
 
-import java.time.Duration;
 import java.time.Instant;
 import java.util.Map;
 import java.util.UUID;
-import java.util.concurrent.ExecutionException;
-import java.util.concurrent.TimeUnit;
-import java.util.concurrent.TimeoutException;
 
 /**
  * Turns a raw {@link WebhookRequest} into a normalized {@link AlertReceivedEvent}
- * and publishes it to Kafka. The dedup key collapses repeated signals from the same
- * source + entity onto one incident downstream.
+ * and hands it to the transactional outbox. The dedup key collapses repeated signals from the same
+ * source + entity onto one incident downstream and is returned to the caller as the correlation handle.
  *
- * <p>Reliability (Phase 3.5): the raw payload is persisted before publishing, the send is
- * confirmed synchronously (acks=all), and a failed publish is surfaced to the caller via
- * {@link EventPublishException} instead of being silently dropped.
+ * <p>Reliability (Phase 9 T3): the raw payload audit row and the normalized event are written in one
+ * transaction — the {@code outbox} INSERT joins the same tx as the {@code raw_inbound_event} row, so a
+ * rollback writes neither (no ghost) and a commit durably accepts the event (never lost). The
+ * {@link OutboxRelay} publishes the row to Kafka asynchronously with confirm; ingestion no longer blocks
+ * on the broker. A 202 therefore means "durably accepted", not "published to Kafka".
  *
  * <p>Phase 1a: the integration key is resolved against identity-service to obtain the real
- * organization + integration id, replacing the Sprint 1 dev placeholder. An invalid key is
- * rejected before anything is stored or published.
+ * organization + integration id. An invalid key is rejected (401) before anything is stored.
  */
 @Service
 public class AlertNormalizer {
 
-    private static final Logger log = LoggerFactory.getLogger(AlertNormalizer.class);
+    private static final String AGGREGATE_TYPE = "alert";
 
-    private static final Duration PUBLISH_TIMEOUT = Duration.ofSeconds(10);
-
-    private final KafkaTemplate<String, Object> kafkaTemplate;
+    private final OutboxAppender outbox;
     private final RawInboundEventRepository rawEvents;
     private final ObjectMapper objectMapper;
     private final IdentityClient identityClient;
 
-    public AlertNormalizer(KafkaTemplate<String, Object> kafkaTemplate,
+    public AlertNormalizer(OutboxAppender outbox,
                            RawInboundEventRepository rawEvents,
                            ObjectMapper objectMapper,
                            IdentityClient identityClient) {
-        this.kafkaTemplate = kafkaTemplate;
+        this.outbox = outbox;
         this.rawEvents = rawEvents;
         this.objectMapper = objectMapper;
         this.identityClient = identityClient;
     }
 
-    public UUID normalizeAndPublish(String integrationKey, String routingKey, WebhookRequest request) {
-        // Validate + resolve the key first; an invalid key is rejected (401) before we store or publish.
+    /** Outcome of a successful ingestion: the per-request event id plus the alert correlation key. */
+    public record Accepted(UUID eventId, String dedupKey) {
+    }
+
+    @Transactional
+    public Accepted normalizeAndPublish(String integrationKey, String routingKey, WebhookRequest request) {
+        // Validate + resolve the key first; an invalid key is rejected (401) before we store anything.
         IdentityClient.Resolution tenant = identityClient.resolve(integrationKey);
 
         UUID eventId = UUID.randomUUID();
         String dedupKey = request.source() + ":" + request.entityId();
 
-        // Persist the raw payload first so a publish failure leaves a durable, replayable trace.
-        RawInboundEvent raw = rawEvents.save(RawInboundEvent.received(
+        // Persist the raw inbound payload (audit + replay trace of what arrived at the door).
+        rawEvents.save(RawInboundEvent.received(
                 eventId, integrationKey, routingKey, request.source(), dedupKey,
                 serialize(request), Instant.now()));
 
@@ -83,25 +82,11 @@ public class AlertNormalizer {
                 request.metadata() != null ? request.metadata() : Map.of()
         );
 
-        try {
-            // Block until the broker acknowledges the write (acks=all). No silent loss.
-            kafkaTemplate.send(Topics.ALERT_RECEIVED, dedupKey, event)
-                    .get(PUBLISH_TIMEOUT.toMillis(), TimeUnit.MILLISECONDS);
-            raw.markPublished(Instant.now());
-            rawEvents.save(raw);
-            return eventId;
-        } catch (ExecutionException | TimeoutException e) {
-            raw.markFailed(e.getMessage());
-            rawEvents.save(raw);
-            log.error("Failed to publish {} for dedupKey={}, rawEventId={}",
-                    Topics.ALERT_RECEIVED, dedupKey, raw.getId(), e);
-            throw new EventPublishException("Could not publish alert to Kafka", e);
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            raw.markFailed("interrupted");
-            rawEvents.save(raw);
-            throw new EventPublishException("Interrupted while publishing alert to Kafka", e);
-        }
+        // Same tx as the audit row: rolls back together (no ghost), commits together (durably accepted).
+        // The relay publishes to Kafka later with confirm. dedupKey is the key, preserving partition order.
+        outbox.append(AGGREGATE_TYPE, dedupKey, Topics.ALERT_RECEIVED, dedupKey, event);
+
+        return new Accepted(eventId, dedupKey);
     }
 
     private String serialize(WebhookRequest request) {

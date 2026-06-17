@@ -1,7 +1,6 @@
 package com.urunsiyabend.heimcall.integration.web;
 
 import com.urunsiyabend.heimcall.integration.AlertNormalizer;
-import com.urunsiyabend.heimcall.integration.EventPublishException;
 import com.urunsiyabend.heimcall.integration.InvalidIntegrationKeyException;
 import com.urunsiyabend.heimcall.integration.KeyResolutionUnavailableException;
 import jakarta.validation.Valid;
@@ -16,12 +15,14 @@ import org.springframework.web.bind.annotation.ResponseStatus;
 import org.springframework.web.bind.annotation.RestController;
 
 import java.util.Map;
-import java.util.UUID;
 
 /**
  * Generic webhook ingestion endpoint.
- * Sprint 1: integration-key validation is stubbed (identity-service arrives in a later phase);
- * any key is accepted and the payload is normalized and published to Kafka.
+ *
+ * <p>A 202 means the event was durably accepted into the outbox (it will be published to Kafka by the
+ * relay), not that it has reached the broker or been processed downstream. The response carries the
+ * per-request {@code eventId} (idempotency / request handle) and the {@code dedupKey} (the alert
+ * correlation key the caller reuses for follow-up ACK/RECOVERY signals, à la PagerDuty's dedup_key).
  */
 @RestController
 @RequestMapping("/v1/integrations")
@@ -39,17 +40,13 @@ public class IngestionController {
             @PathVariable String routingKey,
             @Valid @RequestBody WebhookRequest request) {
 
-        UUID eventId = normalizer.normalizeAndPublish(integrationKey, routingKey, request);
+        AlertNormalizer.Accepted accepted = normalizer.normalizeAndPublish(integrationKey, routingKey, request);
         return ResponseEntity
                 .status(HttpStatus.ACCEPTED)
-                .body(Map.of("status", "accepted", "eventId", eventId.toString()));
-    }
-
-    /** A publish that the broker never confirmed is a server-side failure, not a client error. */
-    @ExceptionHandler(EventPublishException.class)
-    @ResponseStatus(HttpStatus.SERVICE_UNAVAILABLE)
-    public Map<String, String> onPublishFailure(EventPublishException e) {
-        return Map.of("status", "rejected", "reason", "event not published, retry");
+                .body(Map.of(
+                        "status", "accepted",
+                        "eventId", accepted.eventId().toString(),
+                        "dedupKey", accepted.dedupKey()));
     }
 
     /** Unknown / inactive integration key. */
