@@ -962,6 +962,92 @@ Shared lib `libs/common-outbox` (ships via one dependency + auto-config, like `c
   -> `outbox` PENDING -> relay PUBLISHED (attempts=1, `__TypeId__`/correlation/`traceparent` intact) ->
   `alert.received.v1` carries the byte-correct message; `raw_inbound_event` RECEIVED.
 
+## Phase 10 - Routing Reliability (no silent paging black hole)
+
+Goal: close audit finding #10 — an incident must never silently fail to page anyone because of a routing
+problem. Today `IncidentService.triggerOrDeduplicate` resolves routing/policy from service-catalog
+best-effort and `CatalogClient.resolve` swallows **every** failure into `Optional.empty()`, so three
+distinct situations collapse to the same outcome (incident created, `policyId=null`, escalation
+short-circuits, nobody paged):
+
+- catalog **404** — no service carries that routingKey (genuine no-match);
+- catalog **200 with `escalationPolicyId=null`** — a service matches but has no policy assigned;
+- catalog **down / 5xx / timeout** — infra failure, not a routing decision.
+
+The third is the dangerous one: a transient catalog outage masquerades as a routing decision and silently
+de-pages a real incident.
+
+Industry precedent (researched 2026-06-17): the routing tree is **total** and "nobody paged" is only ever
+an explicit, visible, configured terminal — never a silent fallthrough and never the result of a
+routing-system failure. Prometheus Alertmanager **requires** a top-level catch-all route matching every
+alert. PagerDuty Event Orchestration sends unmatched events to a catch-all whose default is a **suppressed
+alert** (visible in the Alerts Table, non-paging) — explicitly "prevents silent failures" — and is
+configurable to route to a fallback service. Opsgenie cascades to a default routing rule, usually a default
+escalation policy, with "route to no one" as an explicit option.
+
+Decision locked (2026-06-17): adopt PagerDuty's full model — **org-default escalation policy if configured,
+else suppressed-UNROUTED**. The catch-all decision lives in **service-catalog** (single source of routing
+truth, Alertmanager-style total routing tree), so incident-service stays dumb: it sees either a policy
+(ROUTED) or a definitive no-match (UNROUTED), and treats a catalog failure as retryable — never as UNROUTED.
+
+### Ticket breakdown
+
+- **T1 (DONE)** - **incident-service**: distinguish transient catalog failure from a definitive no-match.
+  `CatalogClient.resolve` returns `Optional.empty()` **only** on a real 404 (`HttpClientErrorException.NotFound`);
+  on 5xx / IO / timeout / any other error it throws `RoutingUnavailableException` instead of swallowing.
+  `IncidentService.handle` lets it propagate — `handle` is already `@Transactional`, so the
+  alert/occurrence/incident/timeline writes roll back together (no orphan incident), and the existing
+  `DefaultErrorHandler` retries then dead-letters to `alert.received.v1.DLT`. Retry budget kept at
+  `FixedBackOff(1000ms, 2)` **deliberately**: during an outage each alert blocks the (single) partition
+  ~8s before DLT (3 attempts × 2s connect timeout + 2×1s backoff) — bounded + observable; lengthening the
+  blocking backoff only worsens the partition stall. DLT + a DLT-depth alert is the terminal for a longer
+  outage. Verified on kind (real Kafka/PG): 404 → incident created, no DLT/no retry; catalog scaled to 0 →
+  `RoutingUnavailableException` → DLT (carrying `kafka_dlt-exception-cause-fqcn` + `X-Correlation-Id` +
+  `traceparent`), **no orphan incident**, lag clears; catalog back → consumer healthy, no-match path resumes.
+  - **Two latent bugs surfaced by runtime verification (compile-clean):**
+    1. `CatalogClient`'s `RestClient` had **no timeout** → an endpoint-less ClusterIP does not RST, so the
+       consumer thread hung in `resolve` indefinitely and stalled the partition (no throw, no DLT). Fixed
+       with `ClientHttpRequestFactorySettings` connect=2s / read=3s (overridable via
+       `catalog.connect-timeout-ms` / `catalog.read-timeout-ms`).
+    2. The incident DLT producer's `DelegatingByTypeSerializer` used **exact-match** over `{byte[], Object}`,
+       so a record whose value had already deserialized to an event object (every **application** exception,
+       not just poison-pills) threw `SerializationException` on DLT publish → the recoverer failed → infinite
+       retry loop (dead-lettering was silently broken for all non-deserialization failures). Fixed with
+       `assignable=true` over an ordered (`LinkedHashMap`, byte[] first) map: poison-pill byte[] → raw,
+       deserialized event → JSON. **Shipped in the same incident-service slice as T1 (its DLT guarantee
+       depends on it).**
+  - Recovery analysis (thundering herd): NOT a concern with today's topology — `alert.received.v1` is
+    single-partition + listener concurrency 1, so on catalog recovery the backlog drains **sequentially**
+    (a seri burst, not a concurrent stampede), and only incident-service calls catalog routing. The real
+    recovery risk is a **cold catalog** (cold JVM/pool just past readiness) being hit by the draining
+    backlog → slow responses may exceed the 3s read timeout → spurious DLT of alerts that arrived during the
+    outage. The deferred routing-cache (below) closes this too. **Caveat:** if `alert.received.v1` later
+    gets multiple partitions + concurrency >1 for throughput, a real thundering herd against catalog
+    appears — revisit then.
+- **T2** - **service-catalog**: org-default catch-all policy, making routing resolution total.
+  Add an org-level `default_escalation_policy_id` (config + a set/clear endpoint). The internal routing
+  resolve becomes: specific service with a policy → that policy; else (no service, or matched service with
+  no policy) → the org default policy if configured; else 404. Validate the default policy against
+  escalation-service like the per-service policy is today.
+  - Acceptance: no specific match but org default set → resolve returns the default policy (incident
+    escalates via it); default not set and no match → 404.
+- **T3** - **incident-service**: deliberate, observable UNROUTED outcome. On a definitive no-match (404 with
+  no default), create the incident flagged `UNROUTED` (not a silent `NO_POLICY` afterthought): a distinct
+  timeline event, an `incident_unrouted_total` counter (alertable), and an incident flag the UI can surface.
+  No escalation fires — but "nobody paged" is now a visible, counted decision, not an accident.
+  - Acceptance: 404 + no org default → incident is UNROUTED, the counter increments, the incident is
+    visible/queryable, and no escalation is scheduled.
+- **Deferred (follow-up, priority raised)** - incident-service routing cache so a catalog outage longer
+  than the retry budget still pages from last-known routing (Alertmanager's "routing config is local"
+  lesson). This is an **availability/correctness** cache, distinct from the latency caching deliberately
+  dropped after the Phase-10 load measurement (resolve hop measured at ~2-3ms, not a bottleneck). After T1
+  it closes two more holes: (a) alerts arriving **during** an outage escalate from cache instead of being
+  dead-lettered; (b) it removes the cold-catalog spurious-DLT risk on recovery (cache hit → catalog not hit
+  at all). With the cache, the catch-all/UNROUTED path (T2/T3) only triggers on a genuine, catalog-confirmed
+  no-match, never on an outage.
+
+Sliced **T1 first** (highest leverage, localized, verifiable), reviewed before T2/T3.
+
 ## 10. Suggested Repository Structure
 
 ```text
