@@ -19,6 +19,7 @@ public record IncidentResponse(
         String routingKey,
         UUID serviceId,
         UUID escalationPolicyId,
+        boolean unrouted,
         Instant createdAt,
         Instant updatedAt,
         Instant lastEventAt
@@ -27,7 +28,7 @@ public record IncidentResponse(
         return new IncidentResponse(
                 i.getId(), i.getOrganizationId(), i.getSource(), i.getDedupKey(),
                 i.getTitle(), i.getDescription(), i.getSeverity(), i.getStatus(),
-                i.getRoutingKey(), i.getServiceId(), i.getEscalationPolicyId(),
+                i.getRoutingKey(), i.getServiceId(), i.getEscalationPolicyId(), i.isUnrouted(),
                 i.getCreatedAt(), i.getUpdatedAt(), i.getLastEventAt());
     }
 }

@@ -23,6 +23,7 @@ public class IncidentMetrics {
 
     private final IncidentRepository incidents;
     private final Counter triggered;
+    private final Counter unrouted;
     private final Counter acknowledged;
     private final Counter resolved;
     private final Timer timeToAck;
@@ -31,6 +32,7 @@ public class IncidentMetrics {
     public IncidentMetrics(MeterRegistry registry, IncidentRepository incidents) {
         this.incidents = incidents;
         this.triggered = registry.counter("incident.triggered");
+        this.unrouted = registry.counter("incident.unrouted");
         this.acknowledged = registry.counter("incident.acknowledged");
         this.resolved = registry.counter("incident.resolved");
         this.timeToAck = registry.timer("incident.time_to_ack");
@@ -40,6 +42,11 @@ public class IncidentMetrics {
     @TransactionalEventListener(phase = TransactionPhase.AFTER_COMMIT)
     public void onTriggered(IncidentDomainEvents.Triggered e) {
         triggered.increment();
+        // A genuine no-match with no org default (Phase 10 T3): "nobody paged" is now counted + alertable
+        // (incident_unrouted_total), not invisible.
+        if (e.unrouted()) {
+            unrouted.increment();
+        }
     }
 
     @TransactionalEventListener(phase = TransactionPhase.AFTER_COMMIT)

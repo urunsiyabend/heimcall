@@ -212,6 +212,11 @@ table.grid a {
   background: #2a2f3a;
   color: var(--muted);
 }
+.badge-unrouted {
+  background: #4a2f1d;
+  color: #ffba8b;
+  border: 1px solid #6a4326;
+}
 
 /* Detail */
 .detail {

@@ -2,7 +2,7 @@
 
 Living document. Update at the end of every sprint. Reflects what is actually built and running, not what is planned. Plan lives in `01-development-plan.md`; this file is the source of truth for "where are we now".
 
-Last updated: 2026-06-18 (Sprint 16 - Phase 10 T2: org-default catch-all escalation policy — routing resolution now total)
+Last updated: 2026-06-18 (Sprint 17 - Phase 10 T3: deliberate, observable UNROUTED incident outcome — "nobody paged" is now counted)
 
 ## 1. Snapshot
 
@@ -11,7 +11,8 @@ Last updated: 2026-06-18 (Sprint 16 - Phase 10 T2: org-default catch-all escalat
 | Architecture | Microservices-first monorepo, Gradle multi-project |
 | Build | `./gradlew build` green on Java 21 |
 | Runtime verified | Sprint 9 Phase-7 tickets 1-3.1: full loop under real JWT through the gateway (register/login -> token -> CRUD across all services -> ingest -> incident TRIGGER + NOTIFIED), JWT enforced (401 no-token, refresh-as-access rejected, client X-User-Id spoof stripped), incident queries tenant-scoped (cross-org 403) |
-| Last sprint | Sprint 16 - Phase 10 T2 (routing reliability). `service-catalog` org-default catch-all escalation policy makes routing resolution **total**. New `org_routing_default` table (Flyway V3, one row per org) + `OrgRoutingDefaultController` (`PUT/GET/DELETE /v1/organizations/{orgId}/routing-default`, member-gated, default policy validated against escalation-service → 409 on unknown/foreign). `InternalController.resolve` now resolves: specific service with a policy → that policy; else (no service, or matched service with no policy) → org default if set; else 404 — so a 200 never carries a null `escalationPolicyId` anymore. incident-service unchanged (already treats 404 as `Optional.empty()`; the no-default 404 is what T3 turns into a visible UNROUTED outcome). Gateway route added for the new subpath. Verified end-to-end on kind: no default + unmapped key → incident with null policy; default set → resolve returns default → incident stamped + escalation engine fired a task on the default policy → notification.requested; bogus default → 409; clear → 204/404/no-match restored. |
+| Last sprint | Sprint 17 - Phase 10 T3 (routing reliability). `incident-service` turns a definitive routing no-match into a deliberate, observable **UNROUTED** outcome instead of a silent `NO_POLICY` afterthought. After T2 made catalog resolution total, `routing.isEmpty()` is *exactly* a no-match (an outage throws `RoutingUnavailableException` before this point), so on a no-match the incident is created flagged `unrouted=true` (Flyway `V6`): a distinct `UNROUTED` timeline event (replaces `NO_POLICY`), an `incident_unrouted_total` counter (incremented AFTER_COMMIT off the `Triggered` event, which now carries an `unrouted` flag), and `unrouted` on `IncidentResponse` + a UI badge. The `Triggered` event still publishes with `policyId=null`, so escalation short-circuits — no escalation fires, but "nobody paged" is now a counted, queryable decision. Verified on kind: unrouted ingest → `unrouted=true` + UNROUTED timeline + `incident_unrouted_total 1.0` + zero escalation tasks/deliveries; routed regression (org-default set) → `unrouted=false`, policy stamped, escalation fired → EMAIL delivery. |
+| Sprint 16 | Phase 10 T2 (routing reliability). `service-catalog` org-default catch-all escalation policy makes routing resolution **total**. New `org_routing_default` table (Flyway V3, one row per org) + `OrgRoutingDefaultController` (`PUT/GET/DELETE /v1/organizations/{orgId}/routing-default`, member-gated, default policy validated against escalation-service → 409 on unknown/foreign). `InternalController.resolve` now resolves: specific service with a policy → that policy; else (no service, or matched service with no policy) → org default if set; else 404 — so a 200 never carries a null `escalationPolicyId` anymore. incident-service unchanged (already treats 404 as `Optional.empty()`; the no-default 404 is what T3 turns into a visible UNROUTED outcome). Gateway route added for the new subpath. Verified end-to-end on kind: no default + unmapped key → incident with null policy; default set → resolve returns default → incident stamped + escalation engine fired a task on the default policy → notification.requested; bogus default → 409; clear → 204/404/no-match restored. |
 | Sprint 15 | Phase 10 T1 (routing reliability). `incident-service` `CatalogClient.resolve` now distinguishes a definitive no-match (catalog 404 → `Optional.empty()`) from an infra failure (5xx/IO/timeout → throws `RoutingUnavailableException`), so a transient catalog outage no longer silently de-pages a real incident — the `@Transactional` `handle` rolls back (no orphan) and the event retries → DLT. Two latent bugs fixed in the same slice: (a) `CatalogClient` had no HTTP timeout → consumer thread hung on an endpoint-less ClusterIP, stalling the partition (now connect 2s/read 3s); (b) the incident DLT `DelegatingByTypeSerializer` was exact-match → DLT publish threw `SerializationException` for any deserialized-object value → infinite retry loop (dead-lettering was broken for ALL application exceptions, only poison-pills worked; now `assignable=true` + ordered map). Also shipped earlier this sprint: a load-measurement-driven fix moving integration-service's identity key-resolve OUTSIDE the ingest tx (don't hold a DB connection across a network call). All verified on kind with real Kafka/PG. |
 | Tests | First automated test: `OnCallCalculatorTest` (rotation math) |
 | Auth | Real JWT (HS256, `libs/common-security`): identity issues access+refresh; every service validates Bearer and derives `X-User-Id` from the verified token. Header-context stub retired. |
@@ -150,17 +151,24 @@ Ports: api-gateway 8080, integration 8081, incident 8082, identity 8083, service
   - each appends a timeline event (records the actor) and publishes the matching domain event; the
     linked OPEN/ACK alerts are transitioned to follow the incident (ACK -> ACKNOWLEDGED, resolve/cancel -> CLOSED)
   - `reassign` not built (needs `IncidentAssignment`); cancel emits the new `incident.canceled.v1`
-- Routing/ownership stamping (Phase 5): on a new trigger, `CatalogClient` resolves the routingKey to
-  `{serviceId, escalationPolicyId}` and stamps them (Flyway V3). Best-effort: a missing mapping / catalog
-  error / unreachable catalog still creates the incident (`NO_POLICY` timeline event); core never depends on it.
+- Routing/ownership stamping (Phase 5 + Phase 10): on a new trigger, `CatalogClient` resolves the routingKey
+  to `{serviceId, escalationPolicyId}` and stamps them (Flyway V3). After Phase 10 T2 catalog resolution is
+  **total**, so the resolve outcome is one of two things: a policy (ROUTED) or a definitive no-match
+  (`Optional.empty()`). A catalog **outage** is NOT a no-match — `CatalogClient` throws
+  `RoutingUnavailableException` (T1) → retry/DLT + tx rollback, no orphan. A definitive no-match (T3) creates
+  the incident flagged `unrouted=true` (Flyway V6, `incident.unrouted`): a distinct `UNROUTED` timeline event,
+  the `incident_unrouted_total` counter, and `unrouted` on the query response (+ UI badge). No policy is
+  stamped, so the published `incident.triggered.v1` carries `policyId=null` and escalation short-circuits —
+  "nobody paged" is a visible, counted decision, never a silent fallthrough.
 - Domain events (Phase 9 T1, transactional outbox): `IncidentEventPublisher` is now a synchronous
   `@EventListener` that appends `incident.triggered/acknowledged/resolved/canceled.v1` to the `outbox`
   table inside the lifecycle transaction (via `common-outbox`'s `OutboxAppender`); `common-outbox`'s
   relay publishes them. A rolled-back change writes no row (no ghost); a committed one is never lost
   (the prior `AFTER_COMMIT` `KafkaTemplate.send` could drop on a crash/broker-outage). At-least-once;
   consumers idempotent. The old `events*` producer beans in `KafkaConfig` were removed.
-- Persistence (Flyway V1-V5): `incident` (`alert_count` dropped in V4; still carries `routing_key`,
-  `service_id`, `escalation_policy_id`, `dedup_key`/`source`/`external_entity_id`), `incident_timeline_event`,
+- Persistence (Flyway V1-V6): `incident` (`alert_count` dropped in V4; still carries `routing_key`,
+  `service_id`, `escalation_policy_id`, `dedup_key`/`source`/`external_entity_id`, + `unrouted` boolean V6),
+  `incident_timeline_event`,
   `alert`, `alert_occurrence`, `outbox` (V5: id BIGINT identity, topic/key/payload/headers/status, PENDING->PUBLISHED)
   - Incident-level partial unique index `(organization_id, dedup_key) WHERE status IN (TRIGGERED, ACKNOWLEDGED)`
     kept as a backstop alongside the alert-level open-dedup index.
@@ -232,7 +240,8 @@ Ports: api-gateway 8080, integration 8081, incident 8082, identity 8083, service
   `liveness`/`readiness` probe groups. Micrometer auto-instruments JVM, HTTP, and the spring-kafka
   listener/template timers.
   - Domain meters (exact Prometheus names, registered at startup): incident-service
-    `incident_triggered_total`, `incident_acknowledged_total`, `incident_resolved_total` counters +
+    `incident_triggered_total`, `incident_unrouted_total` (Phase 10 T3), `incident_acknowledged_total`,
+    `incident_resolved_total` counters +
     `incident_time_to_ack_seconds`, `incident_time_to_resolve_seconds` timers (`IncidentMetrics`,
     AFTER_COMMIT off `IncidentDomainEvents`; trigger instant = incident `created_at`). notification-service
     `notification_delivery_success_total` (delivered) / `notification_delivery_failure_total` (terminal
@@ -338,7 +347,7 @@ Sprint 2: idempotency, DLT, broker-outage 503. Sprint 1: dedup, recovery, timeli
 | JWT secret is a shared HS256 dev default in yaml; no rotation, no RS256/JWKS, no refresh-token rotation/revocation | later |
 | ~~Redis cache for integration-key resolution + cross-service tenant checks (latency)~~ MEASURED NOT WORTH IT: k6 load test (perf-mode CPU) showed the sync resolve hop is ~2-3ms and flat under load, not a bottleneck; ingest throughput is pod-CPU-bound (1 core), not connection/latency-bound. Earlier apparent saturation was the laptop's CPU governor (balanced→performance fixed it). | dropped (latency); routing **availability** cache is a separate Phase 10 follow-up |
 | Ingest held a DB connection across the identity resolve network call (resolve was inside `@Transactional`) | DONE Sprint 15: `AlertEventWriter` split so resolve runs outside the tx |
-| Incident routing: a transient catalog outage silently de-paged real incidents (resolve swallowed all errors) | DONE Phase 10 T1: 404 vs failure distinguished → retry/DLT, no orphan. T2 DONE (org-default catch-all → routing total). T3 (visible UNROUTED on genuine no-match) pending |
+| Incident routing: a transient catalog outage silently de-paged real incidents (resolve swallowed all errors) | DONE Phase 10 T1: 404 vs failure distinguished → retry/DLT, no orphan. T2 DONE (org-default catch-all → routing total). T3 DONE (genuine no-match → visible, counted `UNROUTED` incident). Routing-availability cache still deferred |
 | RBAC beyond membership (role stored, not enforced per-action) | later |
 | Integration-key revoke/rotate endpoints (revoke on entity, not exposed) | later |
 | Single owning team only; multi-team ownership table | later |
@@ -546,8 +555,8 @@ restart all services off fresh jars to propagate (happy paths unaffected either 
 
 **Phase 9 complete** (T1-T3): all four producing services publish domain events via the transactional outbox.
 
-**Phase 10 - Routing Reliability** (T1, T2 done; T3 + cache pending). Goal: an incident never silently fails
-to page anyone for a routing reason. Driven by a system-wide audit (finding #10) + industry research
+**Phase 10 - Routing Reliability** (T1, T2, T3 done; availability cache deferred). Goal: an incident never
+silently fails to page anyone for a routing reason. Driven by a system-wide audit (finding #10) + industry research
 (Alertmanager mandatory catch-all, PagerDuty suppressed-alert default, Opsgenie default rule).
 - **T1 DONE** - `incident-service` distinguishes a definitive no-match (catalog 404 → `Optional.empty()`)
   from an infra failure (5xx/IO/timeout → `RoutingUnavailableException` → retry/DLT, `@Transactional`
@@ -562,8 +571,13 @@ to page anyone for a routing reason. Driven by a system-wide audit (finding #10)
   default when no specific policy matches; a 200 never carries a null `escalationPolicyId`. Gateway route
   added for the new subpath. incident-service unchanged. Verified on kind (default set → escalation fired on
   the default policy; bogus → 409; clear → no-match restored).
-- **T3 (next)** - `incident-service` deliberate, observable UNROUTED outcome (flag + `incident_unrouted_total`
-  metric + timeline) for a genuine no-match with no default. "Nobody paged" becomes a visible decision.
+- **T3 DONE** - `incident-service` deliberate, observable UNROUTED outcome for a genuine no-match with no
+  default. After T2 made resolution total, `routing.isEmpty()` is *exactly* a no-match (an outage throws
+  before this point), so the old `NO_POLICY` branch becomes UNROUTED: incident flagged `unrouted=true`
+  (Flyway V6), distinct `UNROUTED` timeline event, `incident_unrouted_total` counter (off the `Triggered`
+  event's new `unrouted` flag), `unrouted` on the query response + a UI badge. `Triggered` still published
+  with `policyId=null` → escalation short-circuits, no page. Verified on kind (unrouted ingest counted +
+  not paged; routed regression still pages). "Nobody paged" is now a visible, counted decision.
 - **Deferred (priority raised)** - incident-service routing **availability** cache: bridges a catalog
   outage from last-known routing (no DLT for alerts during the outage) and removes the cold-catalog
   spurious-DLT risk on recovery. Distinct from the dropped latency cache.

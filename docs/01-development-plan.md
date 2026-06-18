@@ -1040,12 +1040,20 @@ truth, Alertmanager-style total routing tree), so incident-service stays dumb: i
   GET 404 / no-match path restored.
   - Acceptance: no specific match but org default set → resolve returns the default policy (incident
     escalates via it); default not set and no match → 404. ✓
-- **T3** - **incident-service**: deliberate, observable UNROUTED outcome. On a definitive no-match (404 with
-  no default), create the incident flagged `UNROUTED` (not a silent `NO_POLICY` afterthought): a distinct
-  timeline event, an `incident_unrouted_total` counter (alertable), and an incident flag the UI can surface.
-  No escalation fires — but "nobody paged" is now a visible, counted decision, not an accident.
+- **T3 (DONE)** - **incident-service**: deliberate, observable UNROUTED outcome. After T2 made catalog
+  resolution total, `routing.isEmpty()` is now *exactly* a definitive no-match (a catalog outage throws
+  `RoutingUnavailableException` before reaching here, never an empty), so the old policy-null `NO_POLICY`
+  branch becomes the UNROUTED branch. On a no-match the incident is created flagged `unrouted=true`
+  (Flyway `V6`, `markUnrouted()`): a distinct `UNROUTED` timeline event (replacing `NO_POLICY`), an
+  `incident_unrouted_total` counter (incremented AFTER_COMMIT off the `Triggered` domain event, which now
+  carries an `unrouted` flag), and `unrouted` exposed on `IncidentResponse` + surfaced as a UI badge.
+  The `Triggered` event is still published (SSE/Kafka stay consistent) with `policyId=null`, so
+  escalation-service short-circuits (its existing `escalationPolicyId == null` guard) — no escalation
+  fires. "Nobody paged" is now a visible, counted decision, not an accident.
   - Acceptance: 404 + no org default → incident is UNROUTED, the counter increments, the incident is
-    visible/queryable, and no escalation is scheduled.
+    visible/queryable, and no escalation is scheduled. ✓ Verified on kind: unrouted ingest → `unrouted=true`,
+    UNROUTED timeline, `incident_unrouted_total 1.0`, zero escalation tasks / zero deliveries; routed
+    regression (org-default set) → `unrouted=false`, policy stamped, escalation fired → EMAIL delivery.
 - **Deferred (follow-up, priority raised)** - incident-service routing cache so a catalog outage longer
   than the retry budget still pages from last-known routing (Alertmanager's "routing config is local"
   lesson). This is an **availability/correctness** cache, distinct from the latency caching deliberately

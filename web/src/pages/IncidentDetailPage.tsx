@@ -55,6 +55,11 @@ export function IncidentDetailPage() {
         <div className="badges">
           <SeverityBadge severity={incident.severity} />
           <StatusBadge status={incident.status} />
+          {incident.unrouted && (
+            <span className="badge badge-unrouted" title="No routing match and no org-default escalation policy — nobody was paged">
+              UNROUTED
+            </span>
+          )}
         </div>
       </div>
 

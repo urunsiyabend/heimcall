@@ -54,6 +54,9 @@ public class Incident {
     @Column(name = "escalation_policy_id")
     private UUID escalationPolicyId;
 
+    @Column(name = "unrouted", nullable = false)
+    private boolean unrouted;
+
     @Column(name = "created_at", nullable = false)
     private Instant createdAt;
 
@@ -90,6 +93,15 @@ public class Incident {
     public void stampRouting(UUID serviceId, UUID escalationPolicyId) {
         this.serviceId = serviceId;
         this.escalationPolicyId = escalationPolicyId;
+    }
+
+    /**
+     * Mark a definitive no-match: service-catalog returned no service for this routingKey AND no
+     * org-default escalation policy is configured (Phase 10 T3). Nobody will be paged — a deliberate,
+     * visible decision, not a silent fallthrough. No policy is stamped, so escalation short-circuits.
+     */
+    public void markUnrouted() {
+        this.unrouted = true;
     }
 
     /** Touch the incident on a duplicate signal (the count itself lives on the linked alert). */
@@ -166,6 +178,10 @@ public class Incident {
 
     public UUID getEscalationPolicyId() {
         return escalationPolicyId;
+    }
+
+    public boolean isUnrouted() {
+        return unrouted;
     }
 
     public Instant getCreatedAt() {

@@ -118,25 +118,35 @@ public class IncidentService {
                 event.externalEntityId(), event.title(), event.description(),
                 event.severity(), event.routingKey(), at);
 
-        // Resolve routing -> owning service + escalation policy (best-effort; incident is created regardless).
+        // Resolve routing -> owning service + escalation policy. After Phase 10 T2 service-catalog
+        // resolution is TOTAL: a 200 always carries a policy (specific service or org-default), and an
+        // empty result is a 404 — a definitive no-match with no org default. So routing.isEmpty() now
+        // means UNROUTED: nobody will be paged. A catalog OUTAGE never reaches here (CatalogClient throws
+        // RoutingUnavailableException -> retry/DLT), so this is a real routing decision, not a failure.
         Optional<Routing> routing = catalog.resolve(event.organizationId(), event.routingKey());
         UUID policyId = routing.map(Routing::escalationPolicyId).orElse(null);
+        boolean unrouted = routing.isEmpty();
         incident.stampRouting(routing.map(Routing::serviceId).orElse(null), policyId);
+        if (unrouted) {
+            incident.markUnrouted();
+        }
 
         incidents.save(incident);
         alert.linkIncident(incident.getId());
         alerts.save(alert);
 
         timeline.save(TimelineEvent.of(incident.getId(), "TRIGGER", "Incident triggered: " + event.title(), at));
-        if (policyId == null) {
-            timeline.save(TimelineEvent.of(incident.getId(), "NO_POLICY",
-                    "No escalation policy resolved (routingKey=" + event.routingKey() + ")", at));
+        if (unrouted) {
+            // Deliberate, observable "nobody paged" terminal (Phase 10 T3), not a silent NO_POLICY afterthought.
+            timeline.save(TimelineEvent.of(incident.getId(), "UNROUTED",
+                    "No routing match and no org-default escalation policy (routingKey=" + event.routingKey()
+                            + "); incident created but NOT paged", at));
         }
-        log.info("Alert {} opened incident {} dedupKey={} policy={}",
-                alert.getId(), incident.getId(), event.dedupKey(), policyId);
+        log.info("Alert {} opened incident {} dedupKey={} policy={} unrouted={}",
+                alert.getId(), incident.getId(), event.dedupKey(), policyId, unrouted);
 
         events.publishEvent(new IncidentDomainEvents.Triggered(incident.getId(), incident.getOrganizationId(),
-                incident.getDedupKey(), incident.getTitle(), incident.getSeverity(), policyId, at));
+                incident.getDedupKey(), incident.getTitle(), incident.getSeverity(), policyId, unrouted, at));
     }
 
     private void recover(AlertReceivedEvent event, Alert alert, Instant at) {

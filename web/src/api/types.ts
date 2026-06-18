@@ -44,6 +44,7 @@ export interface Incident {
   routingKey: string | null
   serviceId: string | null
   escalationPolicyId: string | null
+  unrouted: boolean
   createdAt: string
   updatedAt: string
   lastEventAt: string
