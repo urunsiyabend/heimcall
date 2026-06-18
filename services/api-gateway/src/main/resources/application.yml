@@ -21,7 +21,7 @@ spring:
         - id: service-catalog-service
           uri: ${CATALOG_URI:http://localhost:8084}
           predicates:
-            - Path=/v1/organizations/*/services/**
+            - Path=/v1/organizations/*/services/**,/v1/organizations/*/routing-default
         - id: schedule-service
           uri: ${SCHEDULE_URI:http://localhost:8085}
           predicates:

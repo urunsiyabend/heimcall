@@ -1024,13 +1024,22 @@ truth, Alertmanager-style total routing tree), so incident-service stays dumb: i
     outage. The deferred routing-cache (below) closes this too. **Caveat:** if `alert.received.v1` later
     gets multiple partitions + concurrency >1 for throughput, a real thundering herd against catalog
     appears — revisit then.
-- **T2** - **service-catalog**: org-default catch-all policy, making routing resolution total.
-  Add an org-level `default_escalation_policy_id` (config + a set/clear endpoint). The internal routing
-  resolve becomes: specific service with a policy → that policy; else (no service, or matched service with
-  no policy) → the org default policy if configured; else 404. Validate the default policy against
-  escalation-service like the per-service policy is today.
+- **T2 (DONE)** - **service-catalog**: org-default catch-all policy, making routing resolution total.
+  New `org_routing_default` table (Flyway `V3`, one row per org; absence = no default) +
+  `OrgRoutingDefaultController` (`PUT/GET/DELETE /v1/organizations/{orgId}/routing-default`, member-gated,
+  the default policy validated against escalation-service like the per-service policy → unknown/foreign 409).
+  `InternalController.resolve` is now **total**: specific service with a policy → that policy; else (no
+  service, or matched service with no policy) → the org default if configured; else 404 — so a 200 now
+  **never** carries a null `escalationPolicyId` (the old "matched service, null policy → 200-with-null" case
+  folds into default-or-404). incident-service unchanged: it already treats 404 as `Optional.empty()`, and
+  the no-default 404 is what T3 turns into a visible UNROUTED outcome. Also added the gateway route for the
+  new subpath (`Path=/v1/organizations/*/services/**,/v1/organizations/*/routing-default` on the catalog
+  route, ahead of identity's `/v1/organizations/**`). Verified end-to-end on kind: no default + unmapped key
+  → incident, null policy; org default set → resolve returns default → incident stamped + escalation engine
+  scheduled & fired a task on the default policy → notification.requested; bogus default → 409; clear → 204 /
+  GET 404 / no-match path restored.
   - Acceptance: no specific match but org default set → resolve returns the default policy (incident
-    escalates via it); default not set and no match → 404.
+    escalates via it); default not set and no match → 404. ✓
 - **T3** - **incident-service**: deliberate, observable UNROUTED outcome. On a definitive no-match (404 with
   no default), create the incident flagged `UNROUTED` (not a silent `NO_POLICY` afterthought): a distinct
   timeline event, an `incident_unrouted_total` counter (alertable), and an incident flag the UI can surface.

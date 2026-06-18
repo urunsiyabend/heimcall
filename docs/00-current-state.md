@@ -2,7 +2,7 @@
 
 Living document. Update at the end of every sprint. Reflects what is actually built and running, not what is planned. Plan lives in `01-development-plan.md`; this file is the source of truth for "where are we now".
 
-Last updated: 2026-06-18 (Sprint 15 - Phase 10 T1: routing reliability — distinguish transient catalog failure from no-match; + load-measurement-driven ingest tx-scope fix; + two latent incident-service bugs fixed)
+Last updated: 2026-06-18 (Sprint 16 - Phase 10 T2: org-default catch-all escalation policy — routing resolution now total)
 
 ## 1. Snapshot
 
@@ -11,7 +11,8 @@ Last updated: 2026-06-18 (Sprint 15 - Phase 10 T1: routing reliability — disti
 | Architecture | Microservices-first monorepo, Gradle multi-project |
 | Build | `./gradlew build` green on Java 21 |
 | Runtime verified | Sprint 9 Phase-7 tickets 1-3.1: full loop under real JWT through the gateway (register/login -> token -> CRUD across all services -> ingest -> incident TRIGGER + NOTIFIED), JWT enforced (401 no-token, refresh-as-access rejected, client X-User-Id spoof stripped), incident queries tenant-scoped (cross-org 403) |
-| Last sprint | Sprint 15 - Phase 10 T1 (routing reliability). `incident-service` `CatalogClient.resolve` now distinguishes a definitive no-match (catalog 404 → `Optional.empty()`) from an infra failure (5xx/IO/timeout → throws `RoutingUnavailableException`), so a transient catalog outage no longer silently de-pages a real incident — the `@Transactional` `handle` rolls back (no orphan) and the event retries → DLT. Two latent bugs fixed in the same slice: (a) `CatalogClient` had no HTTP timeout → consumer thread hung on an endpoint-less ClusterIP, stalling the partition (now connect 2s/read 3s); (b) the incident DLT `DelegatingByTypeSerializer` was exact-match → DLT publish threw `SerializationException` for any deserialized-object value → infinite retry loop (dead-lettering was broken for ALL application exceptions, only poison-pills worked; now `assignable=true` + ordered map). Also shipped earlier this sprint: a load-measurement-driven fix moving integration-service's identity key-resolve OUTSIDE the ingest tx (don't hold a DB connection across a network call). All verified on kind with real Kafka/PG. |
+| Last sprint | Sprint 16 - Phase 10 T2 (routing reliability). `service-catalog` org-default catch-all escalation policy makes routing resolution **total**. New `org_routing_default` table (Flyway V3, one row per org) + `OrgRoutingDefaultController` (`PUT/GET/DELETE /v1/organizations/{orgId}/routing-default`, member-gated, default policy validated against escalation-service → 409 on unknown/foreign). `InternalController.resolve` now resolves: specific service with a policy → that policy; else (no service, or matched service with no policy) → org default if set; else 404 — so a 200 never carries a null `escalationPolicyId` anymore. incident-service unchanged (already treats 404 as `Optional.empty()`; the no-default 404 is what T3 turns into a visible UNROUTED outcome). Gateway route added for the new subpath. Verified end-to-end on kind: no default + unmapped key → incident with null policy; default set → resolve returns default → incident stamped + escalation engine fired a task on the default policy → notification.requested; bogus default → 409; clear → 204/404/no-match restored. |
+| Sprint 15 | Phase 10 T1 (routing reliability). `incident-service` `CatalogClient.resolve` now distinguishes a definitive no-match (catalog 404 → `Optional.empty()`) from an infra failure (5xx/IO/timeout → throws `RoutingUnavailableException`), so a transient catalog outage no longer silently de-pages a real incident — the `@Transactional` `handle` rolls back (no orphan) and the event retries → DLT. Two latent bugs fixed in the same slice: (a) `CatalogClient` had no HTTP timeout → consumer thread hung on an endpoint-less ClusterIP, stalling the partition (now connect 2s/read 3s); (b) the incident DLT `DelegatingByTypeSerializer` was exact-match → DLT publish threw `SerializationException` for any deserialized-object value → infinite retry loop (dead-lettering was broken for ALL application exceptions, only poison-pills worked; now `assignable=true` + ordered map). Also shipped earlier this sprint: a load-measurement-driven fix moving integration-service's identity key-resolve OUTSIDE the ingest tx (don't hold a DB connection across a network call). All verified on kind with real Kafka/PG. |
 | Tests | First automated test: `OnCallCalculatorTest` (rotation math) |
 | Auth | Real JWT (HS256, `libs/common-security`): identity issues access+refresh; every service validates Bearer and derives `X-User-Id` from the verified token. Header-context stub retired. |
 
@@ -88,8 +89,13 @@ Ports: api-gateway 8080, integration 8081, incident 8082, identity 8083, service
 - Routing key: `PUT .../services/{id}/routing-key {routingKey}` - maps an inbound alert routingKey to this
   service, unique per org (`routing_key`, Flyway V2)
 - Tags: `PUT/GET/DELETE .../services/{id}/tags` - key/value, unique per (service, key)
+- Org-default catch-all policy (Phase 10 T2): `PUT/GET/DELETE /v1/organizations/{orgId}/routing-default`
+  - member-gated; `PUT {escalationPolicyId}` validated against escalation-service (unknown/foreign -> 409),
+  one row per org (`org_routing_default`, Flyway V3); DELETE idempotent (204). Makes routing **total**.
 - Internal routing lookup (service-to-service): `GET /v1/internal/organizations/{orgId}/routing?routingKey=`
-  -> `{serviceId, escalationPolicyId, ownerTeamId}` (404 if no service carries that key). Used by incident-service.
+  -> `{serviceId, escalationPolicyId, ownerTeamId}`. **Total** resolution (Phase 10 T2): specific service with
+  a policy → that policy; else (no service, or matched service with no policy) → org default if configured;
+  else 404. A 200 never carries a null `escalationPolicyId`. Used by incident-service.
 
 ### schedule-service (port 8085)
 - Tenant rules enforced via identity internal API (`IdentityClient`): caller membership (403) and that
@@ -332,7 +338,7 @@ Sprint 2: idempotency, DLT, broker-outage 503. Sprint 1: dedup, recovery, timeli
 | JWT secret is a shared HS256 dev default in yaml; no rotation, no RS256/JWKS, no refresh-token rotation/revocation | later |
 | ~~Redis cache for integration-key resolution + cross-service tenant checks (latency)~~ MEASURED NOT WORTH IT: k6 load test (perf-mode CPU) showed the sync resolve hop is ~2-3ms and flat under load, not a bottleneck; ingest throughput is pod-CPU-bound (1 core), not connection/latency-bound. Earlier apparent saturation was the laptop's CPU governor (balanced→performance fixed it). | dropped (latency); routing **availability** cache is a separate Phase 10 follow-up |
 | Ingest held a DB connection across the identity resolve network call (resolve was inside `@Transactional`) | DONE Sprint 15: `AlertEventWriter` split so resolve runs outside the tx |
-| Incident routing: a transient catalog outage silently de-paged real incidents (resolve swallowed all errors) | DONE Phase 10 T1: 404 vs failure distinguished → retry/DLT, no orphan. T2 (org-default catch-all policy) + T3 (visible UNROUTED) pending |
+| Incident routing: a transient catalog outage silently de-paged real incidents (resolve swallowed all errors) | DONE Phase 10 T1: 404 vs failure distinguished → retry/DLT, no orphan. T2 DONE (org-default catch-all → routing total). T3 (visible UNROUTED on genuine no-match) pending |
 | RBAC beyond membership (role stored, not enforced per-action) | later |
 | Integration-key revoke/rotate endpoints (revoke on entity, not exposed) | later |
 | Single owning team only; multi-team ownership table | later |
@@ -540,7 +546,7 @@ restart all services off fresh jars to propagate (happy paths unaffected either 
 
 **Phase 9 complete** (T1-T3): all four producing services publish domain events via the transactional outbox.
 
-**Phase 10 - Routing Reliability** (T1 done; T2/T3 + cache pending). Goal: an incident never silently fails
+**Phase 10 - Routing Reliability** (T1, T2 done; T3 + cache pending). Goal: an incident never silently fails
 to page anyone for a routing reason. Driven by a system-wide audit (finding #10) + industry research
 (Alertmanager mandatory catch-all, PagerDuty suppressed-alert default, Opsgenie default rule).
 - **T1 DONE** - `incident-service` distinguishes a definitive no-match (catalog 404 → `Optional.empty()`)
@@ -549,9 +555,14 @@ to page anyone for a routing reason. Driven by a system-wide audit (finding #10)
   hung on endpoint-less ClusterIP) and the incident DLT serializer exact-match (DLT publish failed →
   infinite loop for every application exception). Verified on kind (404 path, catalog-down→DLT+no-orphan,
   recovery). Retry budget kept short on purpose (single partition; blocking backoff would worsen stall).
-- **T2 (next)** - `service-catalog` org-default catch-all escalation policy: routing resolve becomes total
-  (specific-with-policy → org-default → 404).
-- **T3** - `incident-service` deliberate, observable UNROUTED outcome (flag + `incident_unrouted_total`
+- **T2 DONE** - `service-catalog` org-default catch-all escalation policy: routing resolve is now total
+  (specific-with-policy → org-default → 404). New `org_routing_default` table (Flyway V3) +
+  `OrgRoutingDefaultController` (`PUT/GET/DELETE /v1/organizations/{orgId}/routing-default`, member-gated,
+  default policy validated against escalation-service → 409). `InternalController.resolve` returns the
+  default when no specific policy matches; a 200 never carries a null `escalationPolicyId`. Gateway route
+  added for the new subpath. incident-service unchanged. Verified on kind (default set → escalation fired on
+  the default policy; bogus → 409; clear → no-match restored).
+- **T3 (next)** - `incident-service` deliberate, observable UNROUTED outcome (flag + `incident_unrouted_total`
   metric + timeline) for a genuine no-match with no default. "Nobody paged" becomes a visible decision.
 - **Deferred (priority raised)** - incident-service routing **availability** cache: bridges a catalog
   outage from last-known routing (no DLT for alerts during the outage) and removes the cold-catalog
