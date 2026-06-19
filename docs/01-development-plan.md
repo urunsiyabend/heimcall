@@ -1341,9 +1341,30 @@ before the next. T1 is specced concretely below; T2-T5 are outlined and specced 
   replicas (mirrors `EscalationTaskClaimTest`; same inline-SQL scope note).
   - **Net verified by mutation**: flipping the terminal `attemptJustMade >= maxAttempts` to `>` made
     exactly the exhausted-attempts test fail (an extra retry instead of FAILED), then reverted → 11 green.
-- **T5 (OUTLINE)** - **integration-service + schedule edge**: payload normalize/validate (required
-  `messageType`/`entityId`/`source`, `dedupKey = source:entityId`) and the outbox append-in-tx as unit
-  tests; a schedule override-wins / DST-edge case added to the existing `OnCallCalculatorTest` family.
+- **T5 (DONE)** - **integration-service + schedule edge**. `AlertNormalizerTest` (3, Mockito): the
+  resolved tenant + `dedupKey = source:entityId` stamped onto the `AlertReceivedEvent` (org / integration /
+  routingKey / messageType / severity / externalEntityId), the title fallback (`entityDisplayName ?? entityId`),
+  and the resolve-before-persist ordering (an invalid key throws `InvalidIntegrationKeyException` and the
+  writer is never touched — nothing stored). `AlertEventWriterTest` (1, Mockito, real Jackson): `persist`
+  writes both the `raw_inbound_event` audit row and the `outbox` row, with `dedupKey` as both the outbox
+  aggregate id and the message key (per-aggregate partition order); the `@Transactional` atomicity itself
+  isn't unit-testable, so the two writes' arguments are asserted. `OnCallCalculatorTest` (+1):
+  `dstSpringForwardKeepsLocalHandoffTime` — the **DST transition-instant edge the prior tests skipped**
+  (Istanbul has no DST): Berlin springs forward 2026-03-29 02:00→03:00 (a 23h local day), and the 09:00
+  **local** handoff still holds on that day (08:30 → period 1, 09:30 → period 2), proving the
+  `ChronoUnit.DAYS`-on-`ZonedDateTime` count is DST-aware and doesn't drift by the lost hour.
+  - **Net verified by mutation**: swapping `dedupKey` to `entityId:source` failed exactly the normalizer
+    test, then reverted.
+  - Note: required-field validation (`@NotNull`/`@NotBlank` on `WebhookRequest`) is Bean Validation
+    enforced by Spring at the controller — a framework concern left to the e2e gate, not unit-tested here.
+
+**Phase 13 complete (T1-T5).** The repo went from effectively 3 tests to **62**, covering §16's unit /
+integration / contract strategy without Docker: domain logic via Mockito, Kafka resilience via
+`@EmbeddedKafka`, DB-specific SQL (the `FOR UPDATE SKIP LOCKED` claims) via compose-PG `assumeTrue`-skip.
+Every ticket was mutation-verified (a deliberate regression failed exactly the guarding test, then
+reverted). Deferred (documented): no containerized full-stack e2e (the live-fleet manual run stays the e2e
+gate); the claim tests guard the SKIP LOCKED semantics, not the literal production `@Query` string; the
+`processed_event` ledger persistence is not integration-tested at the Kafka level.
 
 ## 10. Suggested Repository Structure
 
