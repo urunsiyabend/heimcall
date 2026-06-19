@@ -3,7 +3,6 @@ package com.urunsiyabend.heimcall.notification;
 import com.urunsiyabend.heimcall.common.events.NotificationDeliveredEvent;
 import com.urunsiyabend.heimcall.common.events.NotificationFailedEvent;
 import com.urunsiyabend.heimcall.common.events.Topics;
-import com.urunsiyabend.heimcall.notification.domain.DeliveryStatus;
 import com.urunsiyabend.heimcall.notification.domain.NotificationChannel;
 import com.urunsiyabend.heimcall.notification.domain.NotificationDelivery;
 import com.urunsiyabend.heimcall.notification.domain.NotificationDeliveryRepository;
@@ -62,8 +61,11 @@ public class DeliveryService {
 
     @Transactional
     public void fireDelivery(UUID deliveryId) {
-        NotificationDelivery delivery = deliveries.findById(deliveryId).orElse(null);
-        if (delivery == null || delivery.getStatus() != DeliveryStatus.PENDING) {
+        // Claim the delivery under a row lock (FOR UPDATE SKIP LOCKED): empty means another worker/replica
+        // already sent it or is sending it now, so skip — prevents sending the same email/webhook twice
+        // across replicas. The lock is held until this tx commits the DELIVERED/FAILED/retry mark.
+        NotificationDelivery delivery = deliveries.findPendingForUpdate(deliveryId).orElse(null);
+        if (delivery == null) {
             return;
         }
         NotificationRequest request = requests.findById(delivery.getRequestEventId()).orElse(null);

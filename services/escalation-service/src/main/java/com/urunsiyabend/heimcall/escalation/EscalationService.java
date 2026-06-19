@@ -139,8 +139,12 @@ public class EscalationService {
      */
     @Transactional
     public void fireDueTask(UUID taskId) {
-        EscalationTask task = tasks.findById(taskId).orElse(null);
-        if (task == null || task.getStatus() != TaskStatus.PENDING) {
+        // Claim the task under a row lock (FOR UPDATE SKIP LOCKED): empty means another worker/replica
+        // already fired it or is firing it now, so skip — this is what makes multi-replica firing safe
+        // and prevents a duplicate notification.requested (double page). The lock is held until this tx
+        // commits the EXECUTED mark below.
+        EscalationTask task = tasks.findPendingForUpdate(taskId).orElse(null);
+        if (task == null) {
             return;
         }
         EscalationIncident incident = incidents.findById(task.getIncidentId()).orElse(null);

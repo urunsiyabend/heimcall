@@ -2,7 +2,7 @@
 
 Living document. Update at the end of every sprint. Reflects what is actually built and running, not what is planned. Plan lives in `01-development-plan.md`; this file is the source of truth for "where are we now".
 
-Last updated: 2026-06-18 (Sprint 17 - Phase 10 T3: deliberate, observable UNROUTED incident outcome — "nobody paged" is now counted)
+Last updated: 2026-06-19 (Sprint 18 - Phase 11 T1: lock-safe scheduled workers — escalation/notification fire exactly once across replicas)
 
 ## 1. Snapshot
 
@@ -11,7 +11,8 @@ Last updated: 2026-06-18 (Sprint 17 - Phase 10 T3: deliberate, observable UNROUT
 | Architecture | Microservices-first monorepo, Gradle multi-project |
 | Build | `./gradlew build` green on Java 21 |
 | Runtime verified | Sprint 9 Phase-7 tickets 1-3.1: full loop under real JWT through the gateway (register/login -> token -> CRUD across all services -> ingest -> incident TRIGGER + NOTIFIED), JWT enforced (401 no-token, refresh-as-access rejected, client X-User-Id spoof stripped), incident queries tenant-scoped (cross-org 403) |
-| Last sprint | Sprint 17 - Phase 10 T3 (routing reliability). `incident-service` turns a definitive routing no-match into a deliberate, observable **UNROUTED** outcome instead of a silent `NO_POLICY` afterthought. After T2 made catalog resolution total, `routing.isEmpty()` is *exactly* a no-match (an outage throws `RoutingUnavailableException` before this point), so on a no-match the incident is created flagged `unrouted=true` (Flyway `V6`): a distinct `UNROUTED` timeline event (replaces `NO_POLICY`), an `incident_unrouted_total` counter (incremented AFTER_COMMIT off the `Triggered` event, which now carries an `unrouted` flag), and `unrouted` on `IncidentResponse` + a UI badge. The `Triggered` event still publishes with `policyId=null`, so escalation short-circuits — no escalation fires, but "nobody paged" is now a counted, queryable decision. Verified on kind: unrouted ingest → `unrouted=true` + UNROUTED timeline + `incident_unrouted_total 1.0` + zero escalation tasks/deliveries; routed regression (org-default set) → `unrouted=false`, policy stamped, escalation fired → EMAIL delivery. |
+| Last sprint | Sprint 18 - Phase 11 T1 (concurrency safety). escalation + notification `@Scheduled` workers made **lock-safe across replicas**. `fireDueTask` / `fireDelivery` previously read-then-checked (`findById` + `status != PENDING`) with no row lock → two replicas (or old+new pod on a rolling restart) could both fire one task → duplicate `notification.requested` (double page) / duplicate send. Fixed with a `FOR UPDATE SKIP LOCKED` per-task claim (`findPendingForUpdate`, native query) on `EscalationTaskRepository` + `NotificationDeliveryRepository`, mirroring the `common-outbox` relay — no schema change, no Redis. Per-task (not whole-batch) so each fire keeps its own tx. **Known trade-off (accepted + documented):** claim + work share one `@Transactional`, so the lock is held across the side-effect — mild for escalation (only target-resolve REST + a *local* outbox INSERT, no Kafka send under lock), but in notification it spans the real SMTP/webhook send (bounded ~5s). `SKIP LOCKED` locks only that row, so no cross-replica blocking; two-phase claim is the deferred evolution if notification scales out. Verified on kind: 200 delay-0 tasks under 2 escalation replicas → 200 EXECUTED / 200 requests / 200 deliveries (zero dup); deterministic DB test (tx A holds lock, tx B concurrent claim → 0 rows) proves exactly-one-claimer. |
+| Sprint 17 | Phase 10 T3 (routing reliability). `incident-service` turns a definitive routing no-match into a deliberate, observable **UNROUTED** outcome instead of a silent `NO_POLICY` afterthought. After T2 made catalog resolution total, `routing.isEmpty()` is *exactly* a no-match (an outage throws `RoutingUnavailableException` before this point), so on a no-match the incident is created flagged `unrouted=true` (Flyway `V6`): a distinct `UNROUTED` timeline event (replaces `NO_POLICY`), an `incident_unrouted_total` counter (incremented AFTER_COMMIT off the `Triggered` event, which now carries an `unrouted` flag), and `unrouted` on `IncidentResponse` + a UI badge. The `Triggered` event still publishes with `policyId=null`, so escalation short-circuits — no escalation fires, but "nobody paged" is now a counted, queryable decision. Verified on kind: unrouted ingest → `unrouted=true` + UNROUTED timeline + `incident_unrouted_total 1.0` + zero escalation tasks/deliveries; routed regression (org-default set) → `unrouted=false`, policy stamped, escalation fired → EMAIL delivery. |
 | Sprint 16 | Phase 10 T2 (routing reliability). `service-catalog` org-default catch-all escalation policy makes routing resolution **total**. New `org_routing_default` table (Flyway V3, one row per org) + `OrgRoutingDefaultController` (`PUT/GET/DELETE /v1/organizations/{orgId}/routing-default`, member-gated, default policy validated against escalation-service → 409 on unknown/foreign). `InternalController.resolve` now resolves: specific service with a policy → that policy; else (no service, or matched service with no policy) → org default if set; else 404 — so a 200 never carries a null `escalationPolicyId` anymore. incident-service unchanged (already treats 404 as `Optional.empty()`; the no-default 404 is what T3 turns into a visible UNROUTED outcome). Gateway route added for the new subpath. Verified end-to-end on kind: no default + unmapped key → incident with null policy; default set → resolve returns default → incident stamped + escalation engine fired a task on the default policy → notification.requested; bogus default → 409; clear → 204/404/no-match restored. |
 | Sprint 15 | Phase 10 T1 (routing reliability). `incident-service` `CatalogClient.resolve` now distinguishes a definitive no-match (catalog 404 → `Optional.empty()`) from an infra failure (5xx/IO/timeout → throws `RoutingUnavailableException`), so a transient catalog outage no longer silently de-pages a real incident — the `@Transactional` `handle` rolls back (no orphan) and the event retries → DLT. Two latent bugs fixed in the same slice: (a) `CatalogClient` had no HTTP timeout → consumer thread hung on an endpoint-less ClusterIP, stalling the partition (now connect 2s/read 3s); (b) the incident DLT `DelegatingByTypeSerializer` was exact-match → DLT publish threw `SerializationException` for any deserialized-object value → infinite retry loop (dead-lettering was broken for ALL application exceptions, only poison-pills worked; now `assignable=true` + ordered map). Also shipped earlier this sprint: a load-measurement-driven fix moving integration-service's identity key-resolve OUTSIDE the ingest tx (don't hold a DB connection across a network call). All verified on kind with real Kafka/PG. |
 | Tests | First automated test: `OnCallCalculatorTest` (rotation math) |
@@ -198,6 +199,10 @@ Ports: api-gateway 8080, integration 8081, incident 8082, identity 8083, service
 - Worker (`@Scheduled`, poll-interval-ms): fires due PENDING tasks in their own tx; resolves targets
   (USER direct, SCHEDULE -> schedule internal on-call, TEAM -> identity member list) -> publishes one
   `notification.requested.v1` per recipient; marks EXECUTED. A dependency error leaves the task PENDING (retried).
+  - **Lock-safe across replicas (Phase 11 T1):** `fireDueTask` claims the row via `findPendingForUpdate`
+    (`... WHERE id=? AND status='PENDING' FOR UPDATE SKIP LOCKED`); a concurrent worker/replica sees a locked
+    or no-longer-PENDING row and skips, so a task fires **exactly once** even with multiple replicas. Lock is
+    held until the tx commits (across the bounded target-resolve REST + the local `outbox.append` INSERT).
 - Cancellation: consumes `incident.acknowledged/resolved/canceled.v1` -> cancels still-PENDING tasks for the incident.
 - Internal: `GET /v1/internal/organizations/{orgId}/escalation-policies/{policyId}` (204/404) - policy existence
   check for service-catalog validation.
@@ -216,7 +221,14 @@ Ports: api-gateway 8080, integration 8081, incident 8082, identity 8083, service
   each. No enabled contact method -> nothing to deliver (logged).
 - Worker (`@Scheduled`, poll-interval-ms): fires due PENDING deliveries in their own tx. On success ->
   DELIVERED + `notification.delivered.v1`. On failure -> retry with backoff (`attempts * retry-backoff-ms`)
-  up to `max-attempts` (default 3), then FAILED + `notification.failed.v1`. Delivery state is tracked
+  up to `max-attempts` (default 3), then FAILED + `notification.failed.v1`.
+  - **Lock-safe across replicas (Phase 11 T1):** `fireDelivery` claims the row via `findPendingForUpdate`
+    (`FOR UPDATE SKIP LOCKED`) so a delivery is sent **exactly once** even with multiple replicas. Trade-off
+    (accepted + documented): the claim and the send share one `@Transactional`, so the row lock + DB
+    connection are held across the **real** SMTP/webhook send (bounded ~5s by `notification.webhook.timeout-ms`).
+    `SKIP LOCKED` locks only that one row → other replicas process other deliveries, no cross-replica blocking.
+    Two-phase claim (`PENDING→SENDING`, send outside tx, `→DELIVERED/FAILED`) is the deferred evolution if
+    notification scales out / providers get slow (see plan Phase 11). Delivery state is tracked
   separately from incident/request state (engineering rule).
 - Senders: `EmailSender` (Spring `JavaMailSender` -> SMTP, mailhog locally) and `WebhookSender`
   (HTTP POST of a JSON body, bounded connect/read timeout; non-2xx throws -> retry).
@@ -362,7 +374,8 @@ Sprint 2: idempotency, DLT, broker-outage 503. Sprint 1: dedup, recovery, timeli
 | Telegram channel (only EMAIL + WEBHOOK built) | later |
 | Notification preference is just per-contact-method `enabled`; no cooldown / per-incident throttle / quiet hours | later |
 | Contact-method `destination` not format-validated (email/url); no verification step | later |
-| No Redis notification-cooldown cache; delivery worker has no distributed lock (single instance assumed) | later |
+| No Redis notification-cooldown cache | later |
+| ~~Workers (escalation/notification) not lock-safe on multi-replica~~ DONE Phase 11 T1: `FOR UPDATE SKIP LOCKED` per-task claim → exactly-once across replicas. Trade-off: lock held across notification's SMTP/webhook send (two-phase claim deferred) | Phase 11 |
 | ~~`notification_delivered/failed` events have no consumer yet~~ DONE: incident-service consumes both -> incident timeline (NOTIFIED/NOTIFY_FAILED) | Phase 7 ticket 1 |
 | Tests: only `OnCallCalculatorTest` so far; no integration/contract tests | ongoing |
 
@@ -581,11 +594,19 @@ silently fails to page anyone for a routing reason. Driven by a system-wide audi
 - **Deferred (priority raised)** - incident-service routing **availability** cache: bridges a catalog
   outage from last-known routing (no DLT for alerts during the outage) and removes the cold-catalog
   spurious-DLT risk on recovery. Distinct from the dropped latency cache.
-- Open audit findings ranked for later phases (not silent-paging): worker double-execution on multi-replica
-  (no row lock/leader election — escalation/notification), cross-topic lifecycle ordering race, outbox
-  poison-row head-of-line block (no max-attempts/DLT), unbounded tables (alert_occurrence/timeline/
-  raw_inbound_event/processed_event/notification_delivery), `/v1/internal/**` + key-resolve `permitAll` with
-  no service auth/NetworkPolicy, single shared HS256 secret, SSE in-heap vs HPA min=2.
+- Open audit findings ranked for later phases (not silent-paging): ~~worker double-execution on multi-replica~~
+  **DONE Phase 11 T1** (escalation/notification workers `FOR UPDATE SKIP LOCKED` per-task claim → exactly-once
+  across replicas), cross-topic lifecycle ordering race, outbox poison-row head-of-line block (no
+  max-attempts/DLT), unbounded tables (alert_occurrence/timeline/raw_inbound_event/processed_event/
+  notification_delivery), `/v1/internal/**` + key-resolve `permitAll` with no service auth/NetworkPolicy,
+  single shared HS256 secret, SSE in-heap vs HPA min=2.
+
+**Phase 11 - Concurrency Safety** (T1 done): escalation + notification `@Scheduled` workers made lock-safe
+across replicas via a `FOR UPDATE SKIP LOCKED` per-task claim (`findPendingForUpdate`), mirroring the
+`common-outbox` relay — no schema change, no Redis. Lock held across the side-effect (mild for escalation;
+spans the bounded SMTP/webhook send for notification — accepted trade-off, two-phase claim deferred). Verified
+on kind: 200 tasks under 2 escalation replicas → exactly-once (200/200/200, zero dup) + deterministic
+concurrent-claim DB proof. See plan Phase 11.
 
 Plus cross-cutting hardening still open (Redis caches/cooldown, `processed_event` TTL,
 `reassign` + `IncidentAssignment`, JWT secret rotation/RS256).

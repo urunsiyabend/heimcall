@@ -1065,6 +1065,50 @@ truth, Alertmanager-style total routing tree), so incident-service stays dumb: i
 
 Sliced **T1 first** (highest leverage, localized, verifiable), reviewed before T2/T3.
 
+## Phase 11 - Concurrency Safety (lock-safe scheduled workers)
+
+Goal: close audit finding #1 — make the `@Scheduled` background workers safe to run on more than one
+replica. Today `EscalationWorker.fireDueTasks` and `DeliveryWorker.fireDueDeliveries` run on **every**
+replica; each polls due rows then calls `fireDueTask` / `fireDelivery`, whose only guard was a
+read-then-check (`findById` + `status != PENDING`) with **no row lock**. Under READ_COMMITTED two replicas
+(or the old+new pod during a rolling restart) can both read the same PENDING row, both pass the guard, and
+both fire — a duplicate `notification.requested` → double page, or a duplicate email/webhook send. This
+violates plan §3.2 ("distributed scheduled work must be lock-safe") and blocks ever scaling escalation /
+notification (HPA). Even at `replicas=1` the rolling-restart overlap window makes it a real (narrow) risk.
+
+Decision locked (2026-06-19): adopt the **`FOR UPDATE SKIP LOCKED` per-task claim** already proven in
+`common-outbox`'s relay — no new dependency, no Redis, consistent with the codebase. Each fire claims its
+row under a lock; a concurrent claimer sees either a locked row or a no-longer-PENDING row and skips. Kept
+**per-task** (not whole-batch) so each fire stays in its own transaction — one bad task never rolls back the
+batch, and a losing replica moves on instead of blocking.
+
+### Ticket breakdown
+
+- **T1 (DONE)** - escalation-service + notification-service workers made lock-safe. Added a native
+  `findPendingForUpdate(id)` (`SELECT ... WHERE id=? AND status='PENDING' FOR UPDATE SKIP LOCKED`) to
+  `EscalationTaskRepository` + `NotificationDeliveryRepository`; `EscalationService.fireDueTask` /
+  `DeliveryService.fireDelivery` now claim through it (empty → skip) instead of `findById`. No schema change.
+  - **Lock scope — known trade-off (documented, accepted):** the claim and the work share one
+    `@Transactional` method, so the row lock is held until commit, i.e. **across the side-effect**:
+    - escalation `fireDueTask`: side-effect under lock = SCHEDULE→schedule / TEAM→identity REST resolves
+      (USER = none) + `outbox.append` (a **local** JDBC INSERT, not a Kafka send — the relay publishes
+      async). Bounded by the clients' timeouts. Mild.
+    - notification `fireDelivery`: side-effect under lock = the **real** SMTP / webhook send (webhook
+      connect+read 5s each, `notification.webhook.timeout-ms`). So a DB connection + row lock are pinned for
+      the send duration — the same "don't hold a connection across a network call" shape fixed in integration
+      ingest. Accepted **for now** because: `SKIP LOCKED` locks only that one row (other replicas grab other
+      deliveries → no cross-replica blocking, throughput unaffected), notification runs single-replica, and
+      the send timeout is bounded (~5s). Correctness (exactly-once) is strict.
+    - **Evolution when needed** (notification scales out / providers get slow): two-phase claim — Tx1
+      `PENDING→SENDING` (commit, release lock), `send()` outside any tx, Tx2 `SENDING→DELIVERED/FAILED/retry`.
+      Removes lock-during-send; costs a `SENDING` state + a reclaim/timeout sweep for crashes between Tx1/Tx2,
+      and reintroduces an at-least-once re-send window on that recovery path. Deferred.
+  - Acceptance: with ≥2 replicas, a batch of due tasks fires **exactly once** (no duplicate
+    notification.requested / delivery); two concurrent claimers of one row → exactly one wins. ✓ Verified on
+    kind: 200 delay-0 tasks under 2 escalation replicas → 200 tasks EXECUTED / 200 notification requests /
+    200 deliveries (zero duplicates); a deterministic DB test (tx A holds the lock, tx B's concurrent
+    `FOR UPDATE SKIP LOCKED` claim → 0 rows, row stays PENDING) proves the exactly-one-claimer semantics.
+
 ## 10. Suggested Repository Structure
 
 ```text
