@@ -1231,6 +1231,81 @@ e.g. `notification.requested` per-incident ordering).
     one incident are processed in publish order regardless of relay instance count; the guard test + the
     e2e both green.
 
+## Phase 13 - Test Coverage (close the §16 testing-strategy gap)
+
+Goal: close the standing testing debt. Through Phase 12 the repo has **three** tests
+(`OnCallCalculatorTest`, `IncidentEventListenerTest`, `OutboxRelayOrderingTest`); §16's unit /
+integration / contract strategy is otherwise empty. Every prior phase was verified by manual curl +
+live fleet only, so behavior is exercised but not *regression-protected*: a refactor can silently break
+dedup, a lifecycle guard, the routing decision table, or a retry rule and nothing fails until a manual
+run. This phase builds an automated safety net over the existing behavior — no new product behavior.
+
+### Infra decision (locked 2026-06-19): no Testcontainers
+
+Testcontainers is **unusable on this box** and the dev daemon won't change: its bundled docker-java
+`UnixSocketClientProviderStrategy` pings the socket at the hardcoded `RemoteApiVersion.VERSION_1_32`,
+and Docker engine 29.x has `MinAPIVersion=1.40`, so every container start fails with
+`client version 1.32 is too old`. Confirmed empirically (2026-06-19): `DOCKER_API_VERSION` is **not**
+honored by that strategy, and bumping the testcontainers BOM 1.20.4 → 1.21.3 did not change the ping
+floor. A working fix would need a custom `DockerClientProviderStrategy` — brittle, deferred. So the
+phase **does not depend on Docker for tests**; the strategy routes around it:
+
+- **Domain logic → pure JUnit + Mockito.** No infra, fully CI-portable, the bulk of the new tests.
+  State machines, dedup rules, transition guards, the routing decision table, retry/backoff decisions,
+  rotation math — all pure functions or thin services with mocked collaborators.
+- **Kafka paths → `@EmbeddedKafka` (spring-kafka-test).** An in-JVM broker, **no Docker**. Covers
+  consumer idempotency, DLT routing (poison-pill + application-exception), and listener dispatch.
+- **DB-specific SQL → real compose PostgreSQL, `assumeTrue`-skip when absent.** The proven
+  `OutboxRelayOrderingTest` precedent: tests needing real PG semantics (`FOR UPDATE SKIP LOCKED`
+  claims, partial unique indexes, the per-aggregate ordering guard) run against the docker-compose PG
+  in an isolated schema and skip (not fail) if no PG is reachable, so `./gradlew build` stays green on
+  a bare checkout. `test-support`'s Testcontainers singletons stay in the tree but unused; revisit if
+  the daemon floor ever changes.
+
+Trade-off accepted: DB-specific tests are environment-gated (skip without compose) rather than hermetic,
+and there is no containerized full-stack e2e test (the live-fleet manual run remains the e2e gate). The
+EmbeddedKafka + Mockito + compose-PG mix covers the regression surface without the Docker dependency.
+
+### Ticket breakdown
+
+Sliced per service/concern; **T1 first** (highest leverage, zero infra), each verified + reviewed
+before the next. T1 is specced concretely below; T2-T5 are outlined and specced in detail when reached.
+
+- **T1 (SPEC)** - **incident-service domain unit tests** (the core engine). Pure JUnit + Mockito, no
+  infra. Covers the behavior most central to the product and most exposed to silent regression:
+  - **Event → Alert → Incident mapping** (glossary §2): CRITICAL / WARNING → open alert (or dedup onto
+    the open one) + open incident on a new alert; a repeat → `occurrence_count` bump + DUPLICATE
+    timeline, incident not double-opened; RECOVERY → close alert + resolve its incident; ACKNOWLEDGEMENT
+    → acknowledge alert + its TRIGGERED incident; INFO → record a no-incident alert.
+  - **Dedup invariant**: at most one OPEN alert per `(org, dedupKey)`; a second OPEN attempt dedups, not
+    a new aggregate (the service-level decision; the partial unique index is the DB backstop, covered by
+    a compose-PG test if it adds value).
+  - **Lifecycle transition guards** (`acknowledge` / `resolve` / `cancel`): idempotent no-op when already
+    in the target state; illegal transition → `409`; each action appends the right timeline event and
+    publishes the matching domain event; linked alert transitions follow the incident.
+  - **`RoutingAvailabilityResolver` decision table** (Phase 10 T4, highest-risk logic): catalog 200 →
+    write-through cache + `unrouted=false, fromCache=false`; 404 → tombstone cache + `unrouted=true,
+    policyId=null`; outage + cache hit → `fromCache=true`, policy from cache; outage + cache miss →
+    rethrow `RoutingUnavailableException`. `CatalogClient` + cache repo mocked.
+  - Acceptance: the four areas above are covered by passing unit tests; `./gradlew :services:incident-service:test`
+    green with no running infra; a deliberate inversion of a guard / mapping makes a test fail (the net
+    actually catches regressions).
+- **T2 (OUTLINE)** - **incident-service Kafka resilience** via `@EmbeddedKafka`: `processed_event`
+  idempotency (redelivering one `alert.received.v1` doesn't double-open / double-count), DLT routing
+  (poison-pill bytes AND a deserialized-event application exception both land in `alert.received.v1.DLT`
+  — guards the Phase 10 T1 `assignable=true` DLT-serializer fix), the `notification.delivered/failed`
+  feedback listener appends NOTIFIED / NOTIFY_FAILED idempotently.
+- **T3 (OUTLINE)** - **escalation-service**: task materialization + repeat math (one task per level per
+  repeat round at `triggeredAt + delaySeconds`) and cancel-on-close as unit tests; the worker
+  `FOR UPDATE SKIP LOCKED` claim (Phase 11) as a compose-PG concurrent-claimer test (mirrors
+  `OutboxRelayOrderingTest`). Lifecycle dispatch already covered by `IncidentEventListenerTest`.
+- **T4 (OUTLINE)** - **notification-service**: retry/backoff decision (`attempts × retry-backoff`, →
+  FAILED at `max-attempts`) and fan-out to **enabled** contact methods as unit tests; the delivery
+  worker `FOR UPDATE SKIP LOCKED` claim as a compose-PG test.
+- **T5 (OUTLINE)** - **integration-service + schedule edge**: payload normalize/validate (required
+  `messageType`/`entityId`/`source`, `dedupKey = source:entityId`) and the outbox append-in-tx as unit
+  tests; a schedule override-wins / DST-edge case added to the existing `OnCallCalculatorTest` family.
+
 ## 10. Suggested Repository Structure
 
 ```text
