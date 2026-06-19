@@ -8,6 +8,10 @@ spring:
     url: ${DB_URL:jdbc:postgresql://localhost:5433/notification}
     username: ${DB_USERNAME:notification}
     password: ${DB_PASSWORD:notification}
+  data:
+    redis:
+      host: ${REDIS_HOST:localhost}
+      port: ${REDIS_PORT:6379}
   jpa:
     hibernate:
       ddl-auto: validate
@@ -55,6 +59,11 @@ notification:
     max-attempts: ${NOTIFICATION_MAX_ATTEMPTS:3}
     # Backoff before the next attempt = attempts * this (ms).
     retry-backoff-ms: ${NOTIFICATION_RETRY_BACKOFF_MS:10000}
+  # Phase 14 T2: collapse repeat pages for the same (incident, user, channel) within the window.
+  # Redis SET NX EX; fail-open on Redis errors (cooldown is never the source of truth).
+  cooldown:
+    enabled: ${NOTIFICATION_COOLDOWN_ENABLED:true}
+    window-seconds: ${NOTIFICATION_COOLDOWN_WINDOW_SECONDS:60}
 
 # Shared HS256 secret (min 32 bytes). MUST match every service; override in real envs.
 heimcall:

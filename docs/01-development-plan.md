@@ -1412,13 +1412,38 @@ Sliced per concern; **T1 first**, verified + reviewed before T2 is specced in de
     the other); Redis down → decide fail-open vs fail-closed explicitly (default **fail-open** for ingest
     availability, logged) and verify; counters visible in Redis (`rate-limit:*` keys with TTL). Verified on
     the live fleet against real Redis.
-- **T2 (SPEC after T1)** - **notification cooldown** (notification-service + Redis). Before creating a
-  PENDING delivery for a `(incidentId, recipientUserId, channel)`, check
-  `notification-cooldown:{incidentId}:{userId}:{channel}`: present → **suppress** (record the suppression in
-  the timeline/log, create no delivery), absent → `SET key … EX <window> NX` then proceed. Configurable
-  window (default e.g. 60s). DB delivery state stays the source of truth; Redis only collapses a repeat page
-  inside the window. Interaction with the existing fan-out + the Phase 11 `FOR UPDATE SKIP LOCKED` claim to
-  be specced concretely when reached (cooldown is checked at fan-out, before the delivery row exists).
+- **T2 (SPEC)** - **notification cooldown** (notification-service + Redis). Collapses repeat pages for the
+  same `(incidentId, recipientUserId, channel)` within a window — escalation can request a notification at
+  multiple levels/rounds for one incident+user, and without a cooldown each becomes a separate page. The
+  check sits in `NotificationService.onNotificationRequested`'s **fan-out loop**, per enabled contact method
+  (the channel is known there), *before* the `NotificationDelivery.pending(...)` save:
+  - A new `CooldownService` wraps a `StringRedisTemplate`. `tryReserve(incidentId, userId, channel)` does
+    `SET notification-cooldown:{incidentId}:{userId}:{channel} <ts> EX <window> NX`
+    (`opsForValue().setIfAbsent(key, ts, Duration)`): returns **true** (reserved → proceed, create the
+    delivery) or **false** (key already present → **suppress**, create no delivery).
+  - **Suppressed** → increment a `notification_cooldown_suppressed_total` counter (mirrors the existing
+    `notification.delivery.*` meters) + a warn log carrying incident/user/channel. Visibility is metric + log
+    (a timeline event would need a cross-service publish back to incident-service — out of scope for T2;
+    noted as a possible follow-up).
+  - **Fail-open:** any Redis error in `tryReserve` is caught → returns true (proceed). Cooldown is a
+    suppression optimization, never the source of truth (engineering rule §3.2); a Redis outage must not stop
+    real pages.
+  - Config: `notification.cooldown.enabled` (default true; false → `tryReserve` always true) +
+    `notification.cooldown.window-seconds` (default 60). `spring.data.redis.host/port` added (servlet
+    service → non-reactive `spring-boot-starter-data-redis` / lettuce).
+  - **Idempotency interaction:** the existing request-id `existsById` guard runs *before* fan-out, so a
+    redelivered request never re-reserves the cooldown (it short-circuits). The reserve happens once per
+    request processing.
+  - **Accepted trade-off (documented):** the reserve writes to Redis inside the fan-out `@Transactional`;
+    Redis is not enlisted in the DB tx, so a (rare) rollback after a reserve leaves the cooldown key set
+    until it expires (could suppress the next legit page within the window). The fan-out tx only does local
+    DB saves (low rollback risk) and the key self-expires; not worth a compensating delete. Two-phase reserve
+    is the deferred evolution if it ever bites.
+  - Acceptance: two `notification.requested` for the same incident+user+channel within the window → first
+    creates a delivery, second is suppressed (no second delivery, counter +1); after the window expires a
+    third is delivered again; a different channel (or different incident/user) is never suppressed by another
+    key; `cooldown.enabled=false` → never suppressed; Redis down → fail-open (delivery still created). Verify
+    on the live fleet against real Redis.
 
 ## 10. Suggested Repository Structure
 

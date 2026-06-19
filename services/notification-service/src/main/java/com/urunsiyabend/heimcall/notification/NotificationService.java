@@ -7,6 +7,8 @@ import com.urunsiyabend.heimcall.notification.domain.NotificationDelivery;
 import com.urunsiyabend.heimcall.notification.domain.NotificationDeliveryRepository;
 import com.urunsiyabend.heimcall.notification.domain.NotificationRequest;
 import com.urunsiyabend.heimcall.notification.domain.NotificationRequestRepository;
+import io.micrometer.core.instrument.Counter;
+import io.micrometer.core.instrument.MeterRegistry;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
@@ -28,12 +30,17 @@ public class NotificationService {
     private final NotificationRequestRepository requests;
     private final NotificationDeliveryRepository deliveries;
     private final ContactMethodRepository contactMethods;
+    private final CooldownService cooldown;
+    private final Counter cooldownSuppressed;
 
     public NotificationService(NotificationRequestRepository requests, NotificationDeliveryRepository deliveries,
-                               ContactMethodRepository contactMethods) {
+                               ContactMethodRepository contactMethods, CooldownService cooldown,
+                               MeterRegistry registry) {
         this.requests = requests;
         this.deliveries = deliveries;
         this.contactMethods = contactMethods;
+        this.cooldown = cooldown;
+        this.cooldownSuppressed = registry.counter("notification.cooldown.suppressed");
     }
 
     @Transactional
@@ -55,11 +62,20 @@ public class NotificationService {
             return;
         }
 
+        int created = 0;
         for (ContactMethod cm : enabled) {
+            // Phase 14 T2: suppress a repeat page for the same (incident, user, channel) within the window.
+            if (!cooldown.tryReserve(event.incidentId(), event.targetUserId(), cm.getChannel())) {
+                cooldownSuppressed.increment();
+                log.warn("Cooldown active: suppressing {} page for user {} on incident {} (request {})",
+                        cm.getChannel(), event.targetUserId(), event.incidentId(), event.eventId());
+                continue;
+            }
             deliveries.save(NotificationDelivery.pending(event.eventId(), event.organizationId(),
                     event.incidentId(), event.targetUserId(), cm.getId(), cm.getChannel(), cm.getDestination(), now));
+            created++;
         }
-        log.info("Notification request {} for incident {} fanned out to {} delivery(ies)",
-                event.eventId(), event.incidentId(), enabled.size());
+        log.info("Notification request {} for incident {} fanned out to {} delivery(ies) ({} suppressed by cooldown)",
+                event.eventId(), event.incidentId(), created, enabled.size() - created);
     }
 }

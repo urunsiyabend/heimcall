@@ -9,6 +9,8 @@ dependencies {
     implementation project(':libs:common-observability')
     implementation project(':libs:common-outbox')
     implementation 'org.springframework.boot:spring-boot-starter-mail'
+    // Phase 14 T2: per-(incident,user,channel) notification cooldown via Redis SET NX EX.
+    implementation 'org.springframework.boot:spring-boot-starter-data-redis'
     implementation 'org.springframework.kafka:spring-kafka'
     implementation 'org.flywaydb:flyway-core'
     runtimeOnly 'org.flywaydb:flyway-database-postgresql'

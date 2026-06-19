@@ -8,10 +8,11 @@ import com.urunsiyabend.heimcall.notification.domain.NotificationChannel;
 import com.urunsiyabend.heimcall.notification.domain.NotificationDelivery;
 import com.urunsiyabend.heimcall.notification.domain.NotificationDeliveryRepository;
 import com.urunsiyabend.heimcall.notification.domain.NotificationRequestRepository;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.ArgumentCaptor;
-import org.mockito.InjectMocks;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
@@ -21,6 +22,7 @@ import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
@@ -40,7 +42,17 @@ class NotificationServiceTest {
     @Mock NotificationRequestRepository requests;
     @Mock NotificationDeliveryRepository deliveries;
     @Mock ContactMethodRepository contactMethods;
-    @InjectMocks NotificationService service;
+    @Mock CooldownService cooldown;
+    SimpleMeterRegistry registry;
+    NotificationService service;
+
+    @BeforeEach
+    void setUp() {
+        registry = new SimpleMeterRegistry();
+        service = new NotificationService(requests, deliveries, contactMethods, cooldown, registry);
+        // Default: cooldown allows the page; the suppression test overrides this.
+        lenient().when(cooldown.tryReserve(any(), any(), any())).thenReturn(true);
+    }
 
     private NotificationRequestedEvent request(UUID eventId) {
         return new NotificationRequestedEvent(eventId, Instant.now(), ORG, UUID.randomUUID(), UUID.randomUUID(),
@@ -49,9 +61,11 @@ class NotificationServiceTest {
 
     private ContactMethod contact(NotificationChannel channel, String destination) {
         ContactMethod cm = mock(ContactMethod.class);
-        when(cm.getId()).thenReturn(UUID.randomUUID());
+        // id/destination are only read on the non-suppressed path; keep lenient so a cooldown-suppressed
+        // contact (which only reads the channel) does not trip strict unnecessary-stubbing.
+        lenient().when(cm.getId()).thenReturn(UUID.randomUUID());
         when(cm.getChannel()).thenReturn(channel);
-        when(cm.getDestination()).thenReturn(destination);
+        lenient().when(cm.getDestination()).thenReturn(destination);
         return cm;
     }
 
@@ -96,5 +110,25 @@ class NotificationServiceTest {
 
         verify(requests, never()).save(any());
         verify(deliveries, never()).save(any());
+    }
+
+    @Test
+    void cooldownSuppressesTheChannelAndCountsIt() {
+        NotificationRequestedEvent event = request(UUID.randomUUID());
+        ContactMethod email = contact(NotificationChannel.EMAIL, "a@acme.io");
+        ContactMethod webhook = contact(NotificationChannel.WEBHOOK, "https://hooks.acme.io/x");
+        when(contactMethods.findByOrganizationIdAndUserIdAndEnabledTrue(ORG, USER))
+                .thenReturn(List.of(email, webhook));
+        // EMAIL is cooling down, WEBHOOK is clear: only the webhook delivery is created.
+        when(cooldown.tryReserve(event.incidentId(), USER, NotificationChannel.EMAIL)).thenReturn(false);
+        when(cooldown.tryReserve(event.incidentId(), USER, NotificationChannel.WEBHOOK)).thenReturn(true);
+
+        service.onNotificationRequested(event);
+
+        verify(requests).save(any());
+        ArgumentCaptor<NotificationDelivery> saved = ArgumentCaptor.forClass(NotificationDelivery.class);
+        verify(deliveries, times(1)).save(saved.capture());
+        assertThat(saved.getValue().getChannel()).isEqualTo(NotificationChannel.WEBHOOK);
+        assertThat(registry.counter("notification.cooldown.suppressed").count()).isEqualTo(1.0);
     }
 }
