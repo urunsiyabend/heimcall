@@ -21,4 +21,9 @@ dependencies {
     compileOnly 'org.slf4j:slf4j-api'
 
     annotationProcessor 'org.springframework.boot:spring-boot-configuration-processor'
+
+    // Tests: the relay's per-aggregate ordering guard is a SQL/row-locking invariant, proven against a
+    // real PostgreSQL (the local docker-compose instance by default) with two concurrent connections.
+    // Skips cleanly (JUnit assumption) when no PostgreSQL is reachable.
+    testImplementation 'org.postgresql:postgresql'
 }

@@ -36,6 +36,19 @@ public class OutboxRelay {
     private static final TypeReference<Map<String, String>> HEADER_MAP = new TypeReference<>() {
     };
 
+    /**
+     * Claims PENDING rows oldest-first, but only an aggregate's <b>lowest-id</b> PENDING row is eligible
+     * (the {@code NOT EXISTS} guard, Phase 12). This preserves per-aggregate publish order even across
+     * <b>multiple relay instances</b>: while instance A holds a row's lock, a later same-aggregate row is
+     * not yet PUBLISHED, so the guard makes it unclaimable by instance B until A commits — B cannot
+     * overtake it. {@code FOR UPDATE SKIP LOCKED} still lets different aggregates publish in parallel.
+     */
+    static final String CLAIM_SQL =
+            "SELECT id, topic, msg_key, payload, headers FROM outbox o WHERE status = 'PENDING' "
+                    + "AND NOT EXISTS (SELECT 1 FROM outbox e WHERE e.aggregate_id = o.aggregate_id "
+                    + "AND e.status = 'PENDING' AND e.id < o.id) "
+                    + "ORDER BY id LIMIT ? FOR UPDATE SKIP LOCKED";
+
     private final JdbcTemplate jdbc;
     private final KafkaTemplate<String, byte[]> relayTemplate;
     private final ObjectMapper objectMapper;
@@ -54,10 +67,7 @@ public class OutboxRelay {
     @Scheduled(fixedDelayString = "${heimcall.outbox.poll-interval-ms:1000}")
     @Transactional
     public void relay() {
-        List<Map<String, Object>> rows = jdbc.queryForList(
-                "SELECT id, topic, msg_key, payload, headers FROM outbox WHERE status = 'PENDING' "
-                        + "ORDER BY id LIMIT ? FOR UPDATE SKIP LOCKED",
-                batchSize);
+        List<Map<String, Object>> rows = jdbc.queryForList(CLAIM_SQL, batchSize);
         for (Map<String, Object> row : rows) {
             long id = ((Number) row.get("id")).longValue();
             String topic = (String) row.get("topic");

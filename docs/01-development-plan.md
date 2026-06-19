@@ -1163,6 +1163,74 @@ batch, and a losing replica moves on instead of blocking.
     200 deliveries (zero duplicates); a deterministic DB test (tx A holds the lock, tx B's concurrent
     `FOR UPDATE SKIP LOCKED` claim → 0 rows, row stays PENDING) proves the exactly-one-claimer semantics.
 
+## Phase 12 - Lifecycle Event Ordering (no cross-topic reorder race)
+
+Goal: close the audit finding that incident lifecycle events can be processed **out of order**, so an ACK
+(or RESOLVE/CANCEL) that arrives before the TRIGGERED it cancels leaves escalation tasks uncancelled →
+**a spurious page for an incident that was already acknowledged/resolved**.
+
+Root cause: the four lifecycle events are on **four separate Kafka topics** (`incident.triggered.v1`,
+`incident.acknowledged.v1`, `incident.resolved.v1`, `incident.canceled.v1`), each its own
+`@KafkaListener` in escalation-service. Kafka orders messages only **within a partition of a single
+topic** — across topics there is no ordering. The ACK handler (`onIncidentClosed`: a small cancel query)
+is also faster than the TRIGGERED handler (policy lookup + N task inserts), so ACK-before-TRIGGERED is
+plausible in normal operation, not only under rebalance. `onIncidentClosed` then finds no PENDING tasks,
+cancels nothing; TRIGGERED arrives after and schedules tasks nobody will cancel; the worker fires them.
+The `processed_event` ledger dedupes by id but does **not** order.
+
+Decision locked (2026-06-19): adopt **Option A — collapse the four topics into one ordered stream**
+`incident.lifecycle.v1`, partition-keyed by `incidentId`. Per-partition ordering then guarantees an
+incident's events are processed in publish order. Only incident-service (producer) and escalation-service
+(consumer) touch these topics, so the blast radius is small; the `<context>.<event-name>.v1` naming
+convention is broken **deliberately** (approved) because lifecycle is a single ordered transition stream,
+not four independent event types. The four typed event records are kept as the payloads; the consumer
+dispatches by the `__TypeId__` header (escalation already runs `spring.json.use.type.headers=true`).
+
+**Critical second half — producer-side ordering under a multi-instance relay.** incident-service runs
+HPA min 2 (Phase 8), so two `common-outbox` relay instances run concurrently. The relay claims rows with
+`FOR UPDATE SKIP LOCKED`: instance A locks the TRIGGERED row, instance B skips it and grabs the ACK row of
+the **same incident**, and they publish concurrently → ACK can reach the partition first. Single topic +
+key does **not** fix this alone. So the relay claim gets a **per-aggregate ordering guard**: only the
+lowest-id PENDING row per `aggregate_id` is claimable —
+```sql
+... WHERE status='PENDING'
+  AND NOT EXISTS (SELECT 1 FROM outbox o2
+                  WHERE o2.aggregate_id = outbox.aggregate_id
+                    AND o2.status='PENDING' AND o2.id < outbox.id)
+  ORDER BY id LIMIT ? FOR UPDATE SKIP LOCKED
+```
+Instance B cannot claim ACK while TRIGGERED is still PENDING (locked by A); it becomes eligible only after
+A marks it PUBLISHED. **Per-aggregate publish order is then guaranteed across relay instances**, while
+different aggregates still publish in parallel (`SKIP LOCKED` unchanged). `aggregate_id` is already
+`incidentId`. This is a `common-outbox` change → a strict improvement for all four producers (also fixes
+e.g. `notification.requested` per-incident ordering).
+
+### Ticket breakdown
+
+- **T1** - single ordered lifecycle topic + relay ordering guard, with tests.
+  - `common-events`: add `INCIDENT_LIFECYCLE = "incident.lifecycle.v1"`; **remove** the four per-event
+    topic constants (contract break, approved). Keep the four event records as payloads.
+  - incident-service `IncidentEventPublisher`: publish all four to `INCIDENT_LIFECYCLE` (key already
+    `incidentId`).
+  - escalation-service `IncidentEventListener`: class-level `@KafkaListener(topics = INCIDENT_LIFECYCLE)`
+    + one `@KafkaHandler` per event type (RESOLVED + CANCELED → `onIncidentClosed`); DLT auto-derives to
+    `incident.lifecycle.v1.DLT`.
+  - `common-outbox` `OutboxRelay`: add the per-aggregate ordering guard to the claim query.
+  - **Tests (thorough):**
+    - `common-outbox` Testcontainers PG test (first use of `test-support`): the ordering-guard claim SQL —
+      two PENDING rows for one aggregate (ids N < M) + one for another aggregate; tx A's claim returns N
+      and the other aggregate's row but **not** M; M is unclaimable while N is PENDING; after N→PUBLISHED,
+      M becomes claimable. Proves cross-instance per-aggregate ordering deterministically (mirrors the
+      Phase 11 concurrent-claim DB proof).
+    - escalation dispatch unit test: each `@KafkaHandler` routes its event type to the right
+      `EscalationService` call (Mockito).
+    - Runtime e2e on the local fleet: TRIGGERED then an immediate ACK for the same incident → escalation
+      consumes TRIGGERED before ACK → tasks created then cancelled → **zero** `notification.requested`
+      (no spurious page). Regression: a normal trigger with no ACK still pages.
+  - Acceptance: an ACK published immediately after TRIGGERED never results in a page; lifecycle events for
+    one incident are processed in publish order regardless of relay instance count; the guard test + the
+    e2e both green.
+
 ## 10. Suggested Repository Structure
 
 ```text
