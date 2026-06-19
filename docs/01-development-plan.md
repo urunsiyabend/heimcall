@@ -1328,9 +1328,19 @@ before the next. T1 is specced concretely below; T2-T5 are outlined and specced 
     `JdbcTemplate` `?` string). So it guards the `SKIP LOCKED` exactly-one-claimer **semantics** on the
     `escalation_task` shape, not the literal production query string (a `@DataJpaTest` against real PG
     would, at much higher cost). Commented to mirror `findPendingForUpdate`.
-- **T4 (OUTLINE)** - **notification-service**: retry/backoff decision (`attempts × retry-backoff`, →
-  FAILED at `max-attempts`) and fan-out to **enabled** contact methods as unit tests; the delivery
-  worker `FOR UPDATE SKIP LOCKED` claim as a compose-PG test.
+- **T4 (DONE)** - **notification-service**. `DeliveryServiceTest` (7, pure Mockito, real
+  `SimpleMeterRegistry`): the **retry/backoff decision** — success → DELIVERED + `notification.delivered.v1`
+  + success counter; first failure → retry at `now + 1×backoff` (status stays PENDING, no terminal event);
+  second failure → `2×backoff` (proves the linear `attempts × backoff` scaling); attempts exhausted
+  (`attemptJustMade >= max-attempts`) → FAILED + `notification.failed.v1` + failure counter; plus the
+  guards (claim empty → skip, no sender for channel → FAILED without wasting retries, missing request →
+  FAILED). `NotificationServiceTest` (3): the fan-out — one PENDING delivery per **enabled** contact
+  method (channel/destination asserted), no enabled → request recorded but zero deliveries, idempotent on
+  the request event id. `NotificationDeliveryClaimTest` (1, compose-PG, `assumeTrue`-skip): the
+  `FOR UPDATE SKIP LOCKED` exactly-one-claimer proof so the same email/webhook is never sent twice across
+  replicas (mirrors `EscalationTaskClaimTest`; same inline-SQL scope note).
+  - **Net verified by mutation**: flipping the terminal `attemptJustMade >= maxAttempts` to `>` made
+    exactly the exhausted-attempts test fail (an extra retry instead of FAILED), then reverted → 11 green.
 - **T5 (OUTLINE)** - **integration-service + schedule edge**: payload normalize/validate (required
   `messageType`/`entityId`/`source`, `dedupKey = source:entityId`) and the outbox append-in-tx as unit
   tests; a schedule override-wins / DST-edge case added to the existing `OnCallCalculatorTest` family.
