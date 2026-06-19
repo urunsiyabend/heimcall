@@ -1310,10 +1310,24 @@ before the next. T1 is specced concretely below; T2-T5 are outlined and specced 
     Kafka level — it needs a real DB (the slice has none), and the `handle()` `existsById`→no-op guard is
     already unit-tested in T1 plus exercised in the live-fleet e2e. A real-PG ledger redelivery test is a
     candidate compose-PG slice if it adds value later.
-- **T3 (OUTLINE)** - **escalation-service**: task materialization + repeat math (one task per level per
-  repeat round at `triggeredAt + delaySeconds`) and cancel-on-close as unit tests; the worker
-  `FOR UPDATE SKIP LOCKED` claim (Phase 11) as a compose-PG concurrent-claimer test (mirrors
-  `OutboxRelayOrderingTest`). Lifecycle dispatch already covered by `IncidentEventListenerTest`.
+- **T3 (DONE)** - **escalation-service**. `EscalationServiceTest` (11, pure Mockito, real
+  `SimpleMeterRegistry`): the **task materialization repeat math** — `repeat_count=1` (2 rounds) × 2
+  levels → 4 tasks at `triggeredAt + round*roundSpan + delay` (offsets 0/300/300/600), never previously
+  tested; the five scheduling guards (null policy, tasks-already-exist, policy-not-found, no-rules,
+  idempotent-on-eventId); cancel-on-close (pending → CANCELED + `saveAll`) + idempotency;
+  `fireDueTask` target resolution (USER → one `notification.requested` + EXECUTED; claim returns empty →
+  skip, no outbox append; TEAM → one request per member). `EscalationTaskClaimTest` (1, compose-PG,
+  `assumeTrue`-skip): the `FOR UPDATE SKIP LOCKED` exactly-one-claimer proof (A claims + locks → B's
+  concurrent claim SKIP-LOCKED → empty → A commits EXECUTED → B retry still empty) — the **first
+  automated proof of the Phase 11 T1 claim** (previously only a manual psql session). Lifecycle dispatch
+  already covered by `IncidentEventListenerTest`.
+  - **Net verified by mutation**: dropping the `round*roundSpan` offset made exactly the materialization
+    test fail, then reverted → 17 green.
+  - **Scope note:** the claim test **inlines** the claim SQL (the production `@Query` uses a `:id` named
+    param that a raw-JDBC `PreparedStatement` can't share, unlike `OutboxRelay.CLAIM_SQL` which is a
+    `JdbcTemplate` `?` string). So it guards the `SKIP LOCKED` exactly-one-claimer **semantics** on the
+    `escalation_task` shape, not the literal production query string (a `@DataJpaTest` against real PG
+    would, at much higher cost). Commented to mirror `findPendingForUpdate`.
 - **T4 (OUTLINE)** - **notification-service**: retry/backoff decision (`attempts × retry-backoff`, →
   FAILED at `max-attempts`) and fan-out to **enabled** contact methods as unit tests; the delivery
   worker `FOR UPDATE SKIP LOCKED` claim as a compose-PG test.
