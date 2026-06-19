@@ -1290,11 +1290,26 @@ before the next. T1 is specced concretely below; T2-T5 are outlined and specced 
   - Acceptance: the four areas above are covered by passing unit tests; `./gradlew :services:incident-service:test`
     green with no running infra; a deliberate inversion of a guard / mapping makes a test fail (the net
     actually catches regressions).
-- **T2 (OUTLINE)** - **incident-service Kafka resilience** via `@EmbeddedKafka`: `processed_event`
-  idempotency (redelivering one `alert.received.v1` doesn't double-open / double-count), DLT routing
-  (poison-pill bytes AND a deserialized-event application exception both land in `alert.received.v1.DLT`
-  — guards the Phase 10 T1 `assignable=true` DLT-serializer fix), the `notification.delivered/failed`
-  feedback listener appends NOTIFIED / NOTIFY_FAILED idempotently.
+- **T2 (DONE)** - **incident-service Kafka resilience** via `@EmbeddedKafka` (in-JVM broker, no Docker,
+  no DB). `AlertReceivedResilienceTest` loads a **sliced context** — the real `KafkaConfig` (error
+  handler, DLT recoverer, delegating serializer, type-header notification factory) + Boot's Kafka
+  auto-config + both listeners, with `IncidentService` `@MockBean`'d so no JPA/datasource loads. Four
+  tests prove the infra behavior unit tests can't reach:
+  - **poison-pill** (un-deserializable payload) → routed to `alert.received.v1.DLT` as raw bytes (the
+    `byte[]` delegate);
+  - **application exception** (value already deserialized to an `AlertReceivedEvent`, `handle` throws
+    `RoutingUnavailableException`) → after the bounded retries, dead-lettered via the `Object`→JSON
+    delegate. This is the **regression guard for the Phase 10 T1 `assignable=true` DLT-serializer fix**;
+  - **handled event** → not dead-lettered (and the engine is invoked);
+  - **`notification.delivered.v1`** with a `__TypeId__` header → dispatched through the type-header
+    container factory to the feedback listener (`recordDelivered`).
+  - **Net verified by mutation**: flipping `DelegatingByTypeSerializer(..., true)` → `false` made
+    **exactly** the application-exception DLT test fail (the poison-pill byte[] still routed), then
+    reverted → green.
+  - **Scope (deliberate):** the `processed_event` ledger idempotency is NOT integration-tested at the
+    Kafka level — it needs a real DB (the slice has none), and the `handle()` `existsById`→no-op guard is
+    already unit-tested in T1 plus exercised in the live-fleet e2e. A real-PG ledger redelivery test is a
+    candidate compose-PG slice if it adds value later.
 - **T3 (OUTLINE)** - **escalation-service**: task materialization + repeat math (one task per level per
   repeat round at `triggeredAt + delaySeconds`) and cancel-on-close as unit tests; the worker
   `FOR UPDATE SKIP LOCKED` claim (Phase 11) as a compose-PG concurrent-claimer test (mirrors

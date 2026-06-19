@@ -16,4 +16,5 @@ dependencies {
     implementation project(':libs:common-events')
 
     testImplementation project(':libs:test-support')
+    testImplementation 'org.springframework.kafka:spring-kafka-test'
 }
