@@ -1366,6 +1366,60 @@ reverted). Deferred (documented): no containerized full-stack e2e (the live-flee
 gate); the claim tests guard the SKIP LOCKED semantics, not the literal production `@Query` string; the
 `processed_event` ledger persistence is not integration-tested at the Kafka level.
 
+## Phase 14 - Redis Activation (use Redis where it is correct)
+
+Goal: put Redis to work. It has run in compose (+ a redis-exporter dashboard) since Phase 8 but is
+**wired into zero services** — the §13 Redis plan is otherwise empty. This phase activates it for the two
+use cases where Redis is the *right* tool, and deliberately skips the ones where it would regress or add
+no measured value.
+
+### Where Redis is correct vs. not (decided 2026-06-19)
+
+Framed by engineering rule §3.2 "cache must never be the source of truth":
+
+- ❌ **Distributed locks for scheduled workers** (§13 `lock:escalation-worker`) — already solved *better* by
+  the Phase 11 `FOR UPDATE SKIP LOCKED` per-row claims (no lock-server dependency, no lease-expiry
+  double-fire window). A Redis lock would be a regression. Not built.
+- ❌ **Idempotency cache** (§13 `idempotency:*`) — the DB ledgers (`processed_event`,
+  `notification_request` PK) are already authoritative and idempotent. Redis would be a redundant
+  accelerator in front of a fast indexed lookup; marginal. Not built.
+- ⚠️ **On-call cache** (§13 `oncall-cache:*`) — the on-call resolve is a DB-fast calendar computation; same
+  "measured not worth it" lesson as the integration-key resolve cache (Phase 1a gap, dropped after the
+  Phase-10 load measurement). Low value, **deferred** (revisit only if on-call resolve ever shows up hot).
+- ✅ **Rate limiting** (§13 `rate-limit:*`, §15 "rate limit integration endpoints") — the integration
+  ingest endpoint is currently unprotected; a single misbehaving integration can flood the pipeline.
+  Redis-native (atomic counter + TTL window), and the gateway is the right enforcement point. **T1.**
+- ✅ **Notification cooldown** (§13 `notification-cooldown:*`) — genuine Phase 6 product gap (no throttle /
+  per-incident dedup of repeat pages). Redis-native (key + TTL). Delivery state stays in PG (source of
+  truth); Redis only *suppresses a redundant page* within a window. **T2.**
+
+### Ticket breakdown
+
+Sliced per concern; **T1 first**, verified + reviewed before T2 is specced in detail.
+
+- **T1 (SPEC)** - **rate limit the integration ingest endpoint** (api-gateway + Redis). Spring Cloud
+  Gateway's built-in `RequestRateLimiter` filter backed by `RedisRateLimiter` (token-bucket Lua script,
+  atomic in Redis) on the integration route only. **Key = the `{integrationKey}` path variable** (a
+  `KeyResolver` bean reading it from the request path) — each integration is throttled independently, a
+  natural tenant boundary, and no identity resolve is needed before the limit (the limiter runs before the
+  downstream resolve). Over-limit → **429** with `X-RateLimit-*` headers (gateway default); within limit →
+  forwarded unchanged. `replenishRate` / `burstCapacity` configurable via yml (conservative dev defaults).
+  Gateway adds `spring-boot-starter-data-redis-reactive` + the gateway is already reactive (WebFlux), so
+  the reactive Redis client fits. Redis connection via `spring.data.redis.*` (compose `redis:6379` / host
+  `localhost:6379`).
+  - Acceptance: a burst above `burstCapacity` on `POST /v1/integrations/{key}/events/{routingKey}` → some
+    202s then 429s; two different integration keys are limited independently (one keyed-out does not throttle
+    the other); Redis down → decide fail-open vs fail-closed explicitly (default **fail-open** for ingest
+    availability, logged) and verify; counters visible in Redis (`rate-limit:*` keys with TTL). Verified on
+    the live fleet against real Redis.
+- **T2 (SPEC after T1)** - **notification cooldown** (notification-service + Redis). Before creating a
+  PENDING delivery for a `(incidentId, recipientUserId, channel)`, check
+  `notification-cooldown:{incidentId}:{userId}:{channel}`: present → **suppress** (record the suppression in
+  the timeline/log, create no delivery), absent → `SET key … EX <window> NX` then proceed. Configurable
+  window (default e.g. 60s). DB delivery state stays the source of truth; Redis only collapses a repeat page
+  inside the window. Interaction with the existing fan-out + the Phase 11 `FOR UPDATE SKIP LOCKED` claim to
+  be specced concretely when reached (cooldown is checked at fan-out, before the delivery row exists).
+
 ## 10. Suggested Repository Structure
 
 ```text

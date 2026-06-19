@@ -4,6 +4,10 @@ server:
 spring:
   application:
     name: api-gateway
+  data:
+    redis:
+      host: ${REDIS_HOST:localhost}
+      port: ${REDIS_PORT:6379}
   cloud:
     gateway:
       # CORS for the browser UI. allow-credentials=true forbids "*" origin, so the dev origin is explicit.
@@ -43,6 +47,15 @@ spring:
           uri: ${INTEGRATION_URI:http://localhost:8081}
           predicates:
             - Path=/v1/integrations/**
+          # Phase 14 T1: Redis token-bucket rate limit, keyed per integrationKey. Over-limit -> 429.
+          # Conservative dev defaults; override via RL_REPLENISH_RATE / RL_BURST_CAPACITY.
+          filters:
+            - name: RequestRateLimiter
+              args:
+                key-resolver: "#{@integrationKeyResolver}"
+                redis-rate-limiter.replenishRate: ${RL_REPLENISH_RATE:5}
+                redis-rate-limiter.burstCapacity: ${RL_BURST_CAPACITY:10}
+                redis-rate-limiter.requestedTokens: 1
         - id: incident-service
           uri: ${INCIDENT_URI:http://localhost:8082}
           predicates:
