@@ -3,6 +3,7 @@ package com.urunsiyabend.heimcall.incident.web;
 import com.urunsiyabend.heimcall.common.domain.IncidentStatus;
 import com.urunsiyabend.heimcall.common.domain.Severity;
 import com.urunsiyabend.heimcall.incident.domain.Incident;
+import com.urunsiyabend.heimcall.incident.domain.ReconcileResult;
 
 import java.time.Instant;
 import java.util.UUID;
@@ -20,6 +21,9 @@ public record IncidentResponse(
         UUID serviceId,
         UUID escalationPolicyId,
         boolean unrouted,
+        boolean routedFromCache,
+        Instant reconciledAt,
+        ReconcileResult reconcileResult,
         Instant createdAt,
         Instant updatedAt,
         Instant lastEventAt
@@ -29,6 +33,7 @@ public record IncidentResponse(
                 i.getId(), i.getOrganizationId(), i.getSource(), i.getDedupKey(),
                 i.getTitle(), i.getDescription(), i.getSeverity(), i.getStatus(),
                 i.getRoutingKey(), i.getServiceId(), i.getEscalationPolicyId(), i.isUnrouted(),
+                i.isRoutedFromCache(), i.getReconciledAt(), i.getReconcileResult(),
                 i.getCreatedAt(), i.getUpdatedAt(), i.getLastEventAt());
     }
 }

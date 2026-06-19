@@ -217,6 +217,11 @@ table.grid a {
   color: #ffba8b;
   border: 1px solid #6a4326;
 }
+.badge-from-cache {
+  background: #1d3a4a;
+  color: #8bd0ff;
+  border: 1px solid #265a6a;
+}
 
 /* Detail */
 .detail {

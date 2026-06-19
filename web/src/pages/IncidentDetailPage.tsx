@@ -60,6 +60,17 @@ export function IncidentDetailPage() {
               UNROUTED
             </span>
           )}
+          {incident.routedFromCache && (
+            <span
+              className="badge badge-from-cache"
+              title={
+                'Catalog was unavailable — paged from last-known-good routing' +
+                (incident.reconcileResult ? ` (reconciled: ${incident.reconcileResult})` : ' (not yet reconciled)')
+              }
+            >
+              FROM CACHE
+            </span>
+          )}
         </div>
       </div>
 

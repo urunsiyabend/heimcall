@@ -1,6 +1,7 @@
 package com.urunsiyabend.heimcall.incident.domain;
 
 import com.urunsiyabend.heimcall.common.domain.IncidentStatus;
+import org.springframework.data.domain.Pageable;
 import org.springframework.data.jpa.repository.JpaRepository;
 
 import java.util.List;
@@ -15,4 +16,7 @@ public interface IncidentRepository extends JpaRepository<Incident, UUID> {
     List<Incident> findByOrganizationIdOrderByCreatedAtDesc(UUID organizationId);
 
     List<Incident> findByOrganizationIdAndStatusOrderByCreatedAtDesc(UUID organizationId, IncidentStatus status);
+
+    /** Cache-routed incidents awaiting reconciliation (Phase 10 T4). Capped via {@link Pageable}. */
+    List<Incident> findByRoutedFromCacheTrueAndReconciledAtIsNullOrderByCreatedAtAsc(Pageable pageable);
 }

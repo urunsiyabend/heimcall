@@ -15,7 +15,6 @@ import com.urunsiyabend.heimcall.incident.domain.ProcessedEvent;
 import com.urunsiyabend.heimcall.incident.domain.ProcessedEventRepository;
 import com.urunsiyabend.heimcall.incident.domain.TimelineEvent;
 import com.urunsiyabend.heimcall.incident.domain.TimelineEventRepository;
-import com.urunsiyabend.heimcall.incident.CatalogClient.Routing;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.context.ApplicationEventPublisher;
@@ -43,19 +42,19 @@ public class IncidentService {
     private final AlertRepository alerts;
     private final AlertOccurrenceRepository occurrences;
     private final ProcessedEventRepository processedEvents;
-    private final CatalogClient catalog;
+    private final RoutingAvailabilityResolver routing;
     private final ApplicationEventPublisher events;
 
     public IncidentService(IncidentRepository incidents, TimelineEventRepository timeline,
                            AlertRepository alerts, AlertOccurrenceRepository occurrences,
-                           ProcessedEventRepository processedEvents, CatalogClient catalog,
+                           ProcessedEventRepository processedEvents, RoutingAvailabilityResolver routing,
                            ApplicationEventPublisher events) {
         this.incidents = incidents;
         this.timeline = timeline;
         this.alerts = alerts;
         this.occurrences = occurrences;
         this.processedEvents = processedEvents;
-        this.catalog = catalog;
+        this.routing = routing;
         this.events = events;
     }
 
@@ -118,17 +117,19 @@ public class IncidentService {
                 event.externalEntityId(), event.title(), event.description(),
                 event.severity(), event.routingKey(), at);
 
-        // Resolve routing -> owning service + escalation policy. After Phase 10 T2 service-catalog
-        // resolution is TOTAL: a 200 always carries a policy (specific service or org-default), and an
-        // empty result is a 404 — a definitive no-match with no org default. So routing.isEmpty() now
-        // means UNROUTED: nobody will be paged. A catalog OUTAGE never reaches here (CatalogClient throws
-        // RoutingUnavailableException -> retry/DLT), so this is a real routing decision, not a failure.
-        Optional<Routing> routing = catalog.resolve(event.organizationId(), event.routingKey());
-        UUID policyId = routing.map(Routing::escalationPolicyId).orElse(null);
-        boolean unrouted = routing.isEmpty();
-        incident.stampRouting(routing.map(Routing::serviceId).orElse(null), policyId);
-        if (unrouted) {
+        // Resolve routing -> owning service + escalation policy with a last-known-good availability
+        // fallback (Phase 10 T4). After T2 catalog resolution is TOTAL, so a live answer is either a
+        // policy (ROUTED) or a definitive 404 no-match (UNROUTED). A catalog OUTAGE is neither: the
+        // resolver pages from the cached route (fromCache) if one exists, else re-throws
+        // RoutingUnavailableException so the event is retried + dead-lettered (no orphan, no silent drop).
+        RoutingDecision decision = routing.resolve(event.organizationId(), event.routingKey());
+        UUID policyId = decision.policyId();
+        incident.stampRouting(decision.serviceId(), policyId);
+        if (decision.unrouted()) {
             incident.markUnrouted();
+        }
+        if (decision.fromCache()) {
+            incident.markRoutedFromCache();
         }
 
         incidents.save(incident);
@@ -136,17 +137,25 @@ public class IncidentService {
         alerts.save(alert);
 
         timeline.save(TimelineEvent.of(incident.getId(), "TRIGGER", "Incident triggered: " + event.title(), at));
-        if (unrouted) {
+        if (decision.unrouted()) {
             // Deliberate, observable "nobody paged" terminal (Phase 10 T3), not a silent NO_POLICY afterthought.
             timeline.save(TimelineEvent.of(incident.getId(), "UNROUTED",
                     "No routing match and no org-default escalation policy (routingKey=" + event.routingKey()
                             + "); incident created but NOT paged", at));
         }
-        log.info("Alert {} opened incident {} dedupKey={} policy={} unrouted={}",
-                alert.getId(), incident.getId(), event.dedupKey(), policyId, unrouted);
+        if (decision.fromCache()) {
+            // Degraded routing: catalog was unavailable, so this paged on the last-known-good policy.
+            // Visible (timeline + counter), and a reconciliation job audits it after catalog recovery.
+            timeline.save(TimelineEvent.of(incident.getId(), "ROUTED_FROM_CACHE",
+                    "Catalog unavailable; paged from last-known-good routing (routingKey=" + event.routingKey()
+                            + ", policy=" + policyId + ")", at));
+        }
+        log.info("Alert {} opened incident {} dedupKey={} policy={} unrouted={} fromCache={}",
+                alert.getId(), incident.getId(), event.dedupKey(), policyId, decision.unrouted(), decision.fromCache());
 
         events.publishEvent(new IncidentDomainEvents.Triggered(incident.getId(), incident.getOrganizationId(),
-                incident.getDedupKey(), incident.getTitle(), incident.getSeverity(), policyId, unrouted, at));
+                incident.getDedupKey(), incident.getTitle(), incident.getSeverity(), policyId,
+                decision.unrouted(), decision.fromCache(), at));
     }
 
     private void recover(AlertReceivedEvent event, Alert alert, Instant at) {

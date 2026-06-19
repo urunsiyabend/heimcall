@@ -1054,16 +1054,70 @@ truth, Alertmanager-style total routing tree), so incident-service stays dumb: i
     visible/queryable, and no escalation is scheduled. ✓ Verified on kind: unrouted ingest → `unrouted=true`,
     UNROUTED timeline, `incident_unrouted_total 1.0`, zero escalation tasks / zero deliveries; routed
     regression (org-default set) → `unrouted=false`, policy stamped, escalation fired → EMAIL delivery.
-- **Deferred (follow-up, priority raised)** - incident-service routing cache so a catalog outage longer
-  than the retry budget still pages from last-known routing (Alertmanager's "routing config is local"
-  lesson). This is an **availability/correctness** cache, distinct from the latency caching deliberately
-  dropped after the Phase-10 load measurement (resolve hop measured at ~2-3ms, not a bottleneck). After T1
-  it closes two more holes: (a) alerts arriving **during** an outage escalate from cache instead of being
-  dead-lettered; (b) it removes the cold-catalog spurious-DLT risk on recovery (cache hit → catalog not hit
-  at all). With the cache, the catch-all/UNROUTED path (T2/T3) only triggers on a genuine, catalog-confirmed
+- **T4 (SPEC)** - **incident-service**: routing **availability** cache (last-known-good), so a catalog
+  outage longer than the retry budget still pages from last-known routing instead of dead-lettering
+  (Alertmanager's "routing config is local" lesson). This is an **availability/correctness** cache, distinct
+  from the latency caching deliberately dropped after the Phase-10 load measurement (resolve hop ~2-3ms, not
+  a bottleneck). Closes two holes left by T1-T3: (a) alerts arriving **during** an outage escalate from cache
+  instead of going to DLT; (b) removes the cold-catalog spurious-DLT risk on recovery (cache hit → catalog
+  not hit). With the cache, the catch-all/UNROUTED path (T2/T3) fires only on a genuine, catalog-confirmed
   no-match, never on an outage.
 
-Sliced **T1 first** (highest leverage, localized, verifiable), reviewed before T2/T3.
+  Design decisions locked (2026-06-19):
+  - **Store: Postgres** (`routing_cache` in the incident db), not Redis. No new infra, survives pod restart
+    (the in-heap cold-start gap is exactly when an outage may coincide with a deploy), and routing resolve is
+    off the latency hot path (it's a Kafka consumer, not a sync API). Write-through runs inside `handle`'s tx
+    (same incident-db connection — no cross-resource write).
+  - **Fallback is NOT hidden inside `CatalogClient.resolve`.** A new `RoutingAvailabilityResolver` (owned by
+    incident-service) wraps `CatalogClient`: the client stays low-level (live HTTP + 404-vs-outage), the
+    resolver adds the cache + the decision. `IncidentService` calls the resolver.
+  - The resolver returns a `RoutingDecision { serviceId, policyId, ownerTeamId, unrouted, fromCache }`:
+    - catalog **200** (live routed) → write-through upsert cache → `unrouted=false, fromCache=false`;
+    - catalog **404** (definitive no-match) → **tombstone/delete** the positive cache row → `unrouted=true,
+      fromCache=false, policyId=null` (the existing T3 UNROUTED path);
+    - **outage** (`RoutingUnavailableException`) + cache **hit** → `unrouted=false, fromCache=true`, policy
+      from cache (incident escalates on last-known policy);
+    - **outage** + cache **miss** → rethrow `RoutingUnavailableException` → retry/DLT (T1 behavior unchanged;
+      a never-seen key during an outage is the genuine unknown).
+  - **Only ROUTED (200-with-policy) is ever cached.** UNROUTED (404) is never cached, so it is never paged
+    from cache. A catalog-confirmed 404 **tombstones** any positive row (both on the live path and in
+    reconciliation), so a dead route can never survive to page on the next outage. (Negative caching — serving
+    UNROUTED-from-cache for a 404-confirmed key during an outage — is explicitly **out of scope** here.)
+  - **No TTL.** Availability-first, long-lived last-known-good; freshness comes from write-through on every
+    up resolve and from invalidation on 404, not from expiry.
+  - **Observability of the degraded page:** `routed_from_cache` flag on the incident (Flyway `V7`), a distinct
+    `ROUTED_FROM_CACHE` timeline event, an `incident_routed_from_cache_total` counter, and `routed_from_cache`
+    on `IncidentResponse` + a UI badge (mirrors `unrouted`). A page from stale routing is visible, not silent.
+  - **Reconciliation job** (`@Scheduled`, ~15 min, paced + backoff) — **scoped to cache-routed incidents only,
+    NOT a full-cache sweep.** Scans `incident WHERE routed_from_cache=true AND reconciled_at IS NULL`, groups
+    by **distinct `(org, routingKey)`** (load = #distinct degraded keys, not #cache rows), live-resolves each
+    against catalog after recovery, and compares vs the policy the incident actually used (already on
+    `incident.escalation_policy_id` — no version store needed). Marks each incident `reconcile_result`:
+    `CURRENT_MATCH` (200 same policy), `CURRENT_DRIFT` (200 diff policy → `routing_cache_drift_total` metric),
+    `CURRENT_NOT_FOUND` (404 → tombstone the cache row); catalog still down → leave `reconciled_at` NULL +
+    abort the cycle (retried next run). **Audit-only**: it never re-pages and never mutates the incident's
+    route. The `CURRENT_` prefix means "catalog differs **now**", not "the cache was wrong at outage time"
+    (no catalog as-of history → that claim can't be made).
+  - Schema (Flyway `V7`, incident db):
+    ```sql
+    routing_cache (
+      organization_id uuid, routing_key text,
+      service_id uuid, escalation_policy_id uuid not null, owner_team_id uuid,
+      last_refreshed_at timestamptz not null,
+      primary key (organization_id, routing_key)
+    );
+    -- incident: + routed_from_cache bool not null default false
+    --           + reconciled_at timestamptz null
+    --           + reconcile_result text null
+    ```
+  - Acceptance: catalog down + a previously-seen routingKey → incident is created, `routed_from_cache=true`,
+    `ROUTED_FROM_CACHE` timeline + counter, and escalation **fires on the cached policy** (not DLT). Catalog
+    down + a never-seen key → still DLT (no orphan). Catalog 404 → cache row tombstoned, incident UNROUTED
+    (T3 path). After catalog recovery, the reconciliation job resolves the degraded incidents' distinct keys
+    and stamps `CURRENT_MATCH` / `CURRENT_DRIFT` / `CURRENT_NOT_FOUND` (drift counted), touching only
+    `routed_from_cache` incidents.
+
+Sliced **T1 first** (highest leverage, localized, verifiable), reviewed before T2/T3. T4 follows T3.
 
 ## Phase 11 - Concurrency Safety (lock-safe scheduled workers)
 

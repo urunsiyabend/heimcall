@@ -24,6 +24,7 @@ public class IncidentMetrics {
     private final IncidentRepository incidents;
     private final Counter triggered;
     private final Counter unrouted;
+    private final Counter routedFromCache;
     private final Counter acknowledged;
     private final Counter resolved;
     private final Timer timeToAck;
@@ -33,6 +34,7 @@ public class IncidentMetrics {
         this.incidents = incidents;
         this.triggered = registry.counter("incident.triggered");
         this.unrouted = registry.counter("incident.unrouted");
+        this.routedFromCache = registry.counter("incident.routed_from_cache");
         this.acknowledged = registry.counter("incident.acknowledged");
         this.resolved = registry.counter("incident.resolved");
         this.timeToAck = registry.timer("incident.time_to_ack");
@@ -46,6 +48,11 @@ public class IncidentMetrics {
         // (incident_unrouted_total), not invisible.
         if (e.unrouted()) {
             unrouted.increment();
+        }
+        // A catalog outage paged this incident from the last-known-good cache (Phase 10 T4): a degraded,
+        // counted decision (incident_routed_from_cache_total), not a silent fallthrough.
+        if (e.routedFromCache()) {
+            routedFromCache.increment();
         }
     }
 

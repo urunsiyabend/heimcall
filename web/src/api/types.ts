@@ -45,6 +45,9 @@ export interface Incident {
   serviceId: string | null
   escalationPolicyId: string | null
   unrouted: boolean
+  routedFromCache: boolean
+  reconciledAt: string | null
+  reconcileResult: 'CURRENT_MATCH' | 'CURRENT_DRIFT' | 'CURRENT_NOT_FOUND' | null
   createdAt: string
   updatedAt: string
   lastEventAt: string
