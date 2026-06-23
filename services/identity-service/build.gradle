@@ -5,6 +5,10 @@ dependencies {
     implementation 'org.springframework.boot:spring-boot-starter-data-jpa'
     implementation 'org.springframework.boot:spring-boot-starter-validation'
     implementation 'org.springframework.boot:spring-boot-starter-actuator'
+    // Phase 16 T2: identity-service is the OAuth2 authorization server minting client_credentials
+    // service tokens. Signs with the SAME RS256 key as user tokens (shared JWKSource), so existing
+    // verifiers and /v1/.well-known/jwks.json validate service tokens unchanged.
+    implementation 'org.springframework.boot:spring-boot-starter-oauth2-authorization-server'
     implementation 'org.flywaydb:flyway-core'
     implementation project(':libs:common-security')
     implementation project(':libs:common-observability')

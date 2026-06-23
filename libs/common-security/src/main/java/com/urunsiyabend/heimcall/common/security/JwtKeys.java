@@ -61,6 +61,15 @@ public class JwtKeys {
         return publicByKid.get(kid);
     }
 
+    /**
+     * All published public keys by {@code kid} (active first, then any retired), in the same set the JWKS
+     * endpoint serves. Lets a second consumer of these keys (the OAuth2 authorization server's JWKSource)
+     * publish the identical document, so there is one key source — never a divergent active-only set.
+     */
+    public Map<String, PublicKey> publicKeysByKid() {
+        return java.util.Collections.unmodifiableMap(publicByKid);
+    }
+
     /** The JWKS document ({@code {"keys":[...]}}) for the {@code .well-known/jwks.json} endpoint. */
     public Map<String, Object> jwks() {
         List<Map<String, Object>> keys = publicByKid.entrySet().stream()

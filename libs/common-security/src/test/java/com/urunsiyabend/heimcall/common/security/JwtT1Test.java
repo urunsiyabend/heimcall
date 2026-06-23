@@ -32,7 +32,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  */
 class JwtT1Test {
 
-    private static final String ISSUER = "heimcall";
+    private static final String ISSUER = "https://identity.heimcall.internal";
     private static final String AUDIENCE = "heimcall-api";
     private static final UUID USER = UUID.randomUUID();
 

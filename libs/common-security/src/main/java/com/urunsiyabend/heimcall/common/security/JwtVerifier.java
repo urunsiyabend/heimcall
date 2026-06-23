@@ -54,6 +54,19 @@ public class JwtVerifier {
         return claims;
     }
 
+    /**
+     * A valid service (machine) token addressed to {@code requiredAudience} (this callee). Adds
+     * {@code token_use=service} and an {@code aud} check against the caller-supplied callee name, so a token
+     * minted for one service is rejected at another. Scope authorization is the caller's responsibility
+     * (Phase 16 T3); this only proves the token is a service token meant for us.
+     */
+    public Claims verifyService(String token, String requiredAudience) {
+        Claims claims = parse(token);
+        requireAudience(claims, requiredAudience);
+        requireTokenUse(claims, JwtClaims.SERVICE);
+        return claims;
+    }
+
     private static void requireTokenUse(Claims claims, String expected) {
         if (!expected.equals(claims.get(JwtClaims.TOKEN_USE, String.class))) {
             throw new JwtException("unexpected token_use; required " + expected);

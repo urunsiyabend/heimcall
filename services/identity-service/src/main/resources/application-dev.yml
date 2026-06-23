@@ -1,0 +1,10 @@
+# Phase 16 T2 — dev-only service-client secrets. WEAK AND VISIBLE, for local runs only. This profile is the
+# default locally (spring.profiles.default=dev in application.yml); any other profile must supply secrets via
+# HEIMCALL_CLIENT_SECRET_* or the context fails to start. These values override the blank defaults in the base
+# config; an explicitly set HEIMCALL_CLIENT_SECRET_* env still wins over them.
+heimcall:
+  service-client-secrets:
+    incident: dev-incident-secret
+    escalation: dev-escalation-secret
+    integration: dev-integration-secret
+    catalog: dev-catalog-secret

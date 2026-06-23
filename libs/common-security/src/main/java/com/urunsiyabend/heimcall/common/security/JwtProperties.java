@@ -16,8 +16,12 @@ import java.time.Duration;
 @ConfigurationProperties("heimcall.jwt")
 public class JwtProperties {
 
-    /** Token issuer claim; set on issue, required on verify. Same value for user and service tokens. */
-    private String issuer = "heimcall";
+    /**
+     * Token issuer claim; set on issue, required on verify. The single universal issuer for both user and
+     * service tokens. An absolute URL: the Spring Authorization Server (Phase 16 T2) only accepts a valid-URL
+     * issuer, so user and service tokens share this URL value and every verifier pins it.
+     */
+    private String issuer = "https://identity.heimcall.internal";
 
     /** Audience for user tokens; verified on the resource side. */
     private String audience = "heimcall-api";

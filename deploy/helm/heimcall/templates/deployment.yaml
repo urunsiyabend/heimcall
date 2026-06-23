@@ -40,6 +40,10 @@ spec:
             - name: MANAGEMENT_OTLP_TRACING_ENDPOINT
               value: {{ $root.Values.infra.otlpTracingEndpoint | quote }}
             {{- if eq $name "identity-service" }}
+            # Non-dev profile: no weak service-client secret fallback — the HEIMCALL_CLIENT_SECRET_* below
+            # must all be present or the auth server fails to start (fail-closed).
+            - name: SPRING_PROFILES_ACTIVE
+              value: "prod"
             # Sole RS256 signer: private key from the secret, active kid, and publishes JWKS.
             - name: HEIMCALL_JWT_PRIVATE_KEY
               valueFrom:
@@ -48,6 +52,14 @@ spec:
                   key: jwt-private-key
             - name: HEIMCALL_JWT_KEY_ID
               value: {{ $root.Values.secrets.jwtKeyId | quote }}
+            {{- range $caller, $secret := (default (dict) $root.Values.secrets.serviceClientSecrets) }}
+            # Phase 16 T2: client_credentials secret for caller "{{ $caller }}".
+            - name: HEIMCALL_CLIENT_SECRET_{{ upper $caller }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "heimcall.fullname" $root }}-secrets
+                  key: service-client-secret-{{ $caller }}
+            {{- end }}
             {{- else }}
             # Verifier: fetch the issuer's public keys from identity-service's JWKS endpoint.
             - name: HEIMCALL_JWT_JWKS_URI

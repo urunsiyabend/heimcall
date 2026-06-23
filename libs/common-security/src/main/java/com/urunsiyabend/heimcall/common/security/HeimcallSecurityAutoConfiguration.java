@@ -72,6 +72,17 @@ public class HeimcallSecurityAutoConfiguration {
     @ConditionalOnMissingBean
     public SecurityFilterChain heimcallSecurityFilterChain(HttpSecurity http, JwtAuthenticationFilter jwtFilter)
             throws Exception {
+        return heimcallDefaultChain(http, jwtFilter);
+    }
+
+    /**
+     * Builds the standard stateless-JWT resource chain. Exposed so a service that declares its own
+     * higher-priority chain (e.g. identity-service's Spring Authorization Server chain for {@code /oauth2/**},
+     * which suppresses {@link #heimcallSecurityFilterChain} via {@code @ConditionalOnMissingBean}) can reuse
+     * this exact configuration as its catch-all chain instead of duplicating it.
+     */
+    public static SecurityFilterChain heimcallDefaultChain(HttpSecurity http, JwtAuthenticationFilter jwtFilter)
+            throws Exception {
         http
                 .csrf(AbstractHttpConfigurer::disable)
                 .httpBasic(AbstractHttpConfigurer::disable)
