@@ -39,11 +39,20 @@ spec:
               value: {{ $root.Values.infra.kafkaBootstrapServers | quote }}
             - name: MANAGEMENT_OTLP_TRACING_ENDPOINT
               value: {{ $root.Values.infra.otlpTracingEndpoint | quote }}
-            - name: HEIMCALL_JWT_SECRET
+            {{- if eq $name "identity-service" }}
+            # Sole RS256 signer: private key from the secret, active kid, and publishes JWKS.
+            - name: HEIMCALL_JWT_PRIVATE_KEY
               valueFrom:
                 secretKeyRef:
                   name: {{ include "heimcall.fullname" $root }}-secrets
-                  key: jwt-secret
+                  key: jwt-private-key
+            - name: HEIMCALL_JWT_KEY_ID
+              value: {{ $root.Values.secrets.jwtKeyId | quote }}
+            {{- else }}
+            # Verifier: fetch the issuer's public keys from identity-service's JWKS endpoint.
+            - name: HEIMCALL_JWT_JWKS_URI
+              value: "{{ include "heimcall.svcUrl" (dict "name" "identity-service" "root" $root) }}/v1/.well-known/jwks.json"
+            {{- end }}
             # Cross-service REST base-urls (resolved to cluster Service DNS).
             - name: IDENTITY_BASE_URL
               value: {{ include "heimcall.svcUrl" (dict "name" "identity-service" "root" $root) | quote }}

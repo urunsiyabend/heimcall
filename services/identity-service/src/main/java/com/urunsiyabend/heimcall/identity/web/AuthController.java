@@ -2,7 +2,8 @@ package com.urunsiyabend.heimcall.identity.web;
 
 import com.urunsiyabend.heimcall.common.security.AuthPrincipal;
 import com.urunsiyabend.heimcall.common.security.CurrentUser;
-import com.urunsiyabend.heimcall.common.security.JwtSupport;
+import com.urunsiyabend.heimcall.common.security.JwtIssuer;
+import com.urunsiyabend.heimcall.common.security.JwtVerifier;
 import com.urunsiyabend.heimcall.identity.domain.AppUser;
 import com.urunsiyabend.heimcall.identity.domain.AppUserRepository;
 import com.urunsiyabend.heimcall.identity.domain.Membership;
@@ -42,15 +43,18 @@ public class AuthController {
     private final MembershipRepository memberships;
     private final OrganizationRepository organizations;
     private final PasswordEncoder passwordEncoder;
-    private final JwtSupport jwt;
+    private final JwtIssuer issuer;
+    private final JwtVerifier verifier;
 
     public AuthController(AppUserRepository users, MembershipRepository memberships,
-                          OrganizationRepository organizations, PasswordEncoder passwordEncoder, JwtSupport jwt) {
+                          OrganizationRepository organizations, PasswordEncoder passwordEncoder,
+                          JwtIssuer issuer, JwtVerifier verifier) {
         this.users = users;
         this.memberships = memberships;
         this.organizations = organizations;
         this.passwordEncoder = passwordEncoder;
-        this.jwt = jwt;
+        this.issuer = issuer;
+        this.verifier = verifier;
     }
 
     public record RegisterRequest(@NotBlank @Email String email, @NotBlank String displayName,
@@ -102,18 +106,15 @@ public class AuthController {
     public TokenResponse refresh(@Valid @RequestBody RefreshRequest req) {
         Claims claims;
         try {
-            claims = jwt.parse(req.refreshToken());
+            claims = verifier.verifyRefresh(req.refreshToken());
         } catch (JwtException | IllegalArgumentException e) {
             throw new ApiExceptions.UnauthorizedException("invalid refresh token");
-        }
-        if (!JwtSupport.TYPE_REFRESH.equals(claims.get("type", String.class))) {
-            throw new ApiExceptions.UnauthorizedException("not a refresh token");
         }
         AppUser user = users.findById(UUID.fromString(claims.getSubject()))
                 .orElseThrow(() -> new ApiExceptions.UnauthorizedException("user no longer exists"));
         // New access token; the caller keeps using its existing (still-valid) refresh token.
         return new TokenResponse(
-                jwt.issueAccess(user.getId(), user.getEmail(), user.getDisplayName()),
+                issuer.issueAccess(user.getId(), user.getEmail(), user.getDisplayName()),
                 req.refreshToken(),
                 UserView.of(user));
     }
@@ -131,8 +132,8 @@ public class AuthController {
 
     private TokenResponse tokensFor(AppUser user) {
         return new TokenResponse(
-                jwt.issueAccess(user.getId(), user.getEmail(), user.getDisplayName()),
-                jwt.issueRefresh(user.getId()),
+                issuer.issueAccess(user.getId(), user.getEmail(), user.getDisplayName()),
+                issuer.issueRefresh(user.getId()),
                 UserView.of(user));
     }
 

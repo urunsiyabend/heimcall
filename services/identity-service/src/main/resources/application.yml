@@ -15,10 +15,17 @@ spring:
   flyway:
     enabled: true
 
-# Shared HS256 secret (min 32 bytes). MUST be the same value on every service; override in real envs.
+# RS256 issuer (Phase 16 T1). identity-service is the ONLY holder of the private key; it signs user (and,
+# from T2, service) tokens and publishes the matching public keys at /v1/.well-known/jwks.json. Every other
+# service verifies via that JWKS — there is no shared secret. The dev key below is committed for local use
+# only; in real envs set HEIMCALL_JWT_PRIVATE_KEY (PEM, PKCS#8) from a Secret/KMS and rotate via key-id.
 heimcall:
   jwt:
-    secret: ${HEIMCALL_JWT_SECRET:dev-only-heimcall-jwt-secret-change-me-32b+}
+    private-key: ${HEIMCALL_JWT_PRIVATE_KEY:}
+    private-key-location: ${HEIMCALL_JWT_PRIVATE_KEY_LOCATION:classpath:dev/jwt-dev-private-key.pem}
+    key-id: ${HEIMCALL_JWT_KEY_ID:heimcall-dev-1}
+    retired-public-key: ${HEIMCALL_JWT_RETIRED_PUBLIC_KEY:}
+    retired-key-id: ${HEIMCALL_JWT_RETIRED_KEY_ID:}
     access-ttl: ${HEIMCALL_JWT_ACCESS_TTL:PT1H}
     refresh-ttl: ${HEIMCALL_JWT_REFRESH_TTL:P30D}
 

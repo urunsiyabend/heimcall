@@ -21,12 +21,10 @@ identity:
 escalation:
   base-url: ${ESCALATION_BASE_URL:http://localhost:8086}
 
-# Shared HS256 secret (min 32 bytes). MUST match every service; override in real envs.
+# Verify RS256 user tokens via identity-service's JWKS (Phase 16 T1; no shared secret). Override host in k8s.
 heimcall:
   jwt:
-    secret: ${HEIMCALL_JWT_SECRET:dev-only-heimcall-jwt-secret-change-me-32b+}
-    access-ttl: ${HEIMCALL_JWT_ACCESS_TTL:PT1H}
-    refresh-ttl: ${HEIMCALL_JWT_REFRESH_TTL:P30D}
+    jwks-uri: ${HEIMCALL_JWT_JWKS_URI:http://localhost:8083/v1/.well-known/jwks.json}
 
 management:
   endpoints:

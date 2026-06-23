@@ -35,10 +35,10 @@ public class JwtAuthenticationFilter extends OncePerRequestFilter {
 
     private static final String USER_ID_HEADER = "X-User-Id";
 
-    private final JwtSupport jwt;
+    private final JwtVerifier verifier;
 
-    public JwtAuthenticationFilter(JwtSupport jwt) {
-        this.jwt = jwt;
+    public JwtAuthenticationFilter(JwtVerifier verifier) {
+        this.verifier = verifier;
     }
 
     @Override
@@ -48,18 +48,16 @@ public class JwtAuthenticationFilter extends OncePerRequestFilter {
         String token = bearerToken(request);
         if (token != null) {
             try {
-                Claims claims = jwt.parse(token);
-                if (JwtSupport.TYPE_ACCESS.equals(claims.get("type", String.class))) {
-                    UUID userId = UUID.fromString(claims.getSubject());
-                    AuthPrincipal principal = new AuthPrincipal(
-                            userId, claims.get("email", String.class), claims.get("name", String.class));
-                    UsernamePasswordAuthenticationToken auth =
-                            new UsernamePasswordAuthenticationToken(principal, null, List.of());
-                    SecurityContextHolder.getContext().setAuthentication(auth);
-                    verifiedUserId = userId.toString();
-                }
+                Claims claims = verifier.verifyAccess(token);
+                UUID userId = UUID.fromString(claims.getSubject());
+                AuthPrincipal principal = new AuthPrincipal(
+                        userId, claims.get(JwtClaims.EMAIL, String.class), claims.get(JwtClaims.NAME, String.class));
+                UsernamePasswordAuthenticationToken auth =
+                        new UsernamePasswordAuthenticationToken(principal, null, List.of());
+                SecurityContextHolder.getContext().setAuthentication(auth);
+                verifiedUserId = userId.toString();
             } catch (JwtException | IllegalArgumentException e) {
-                // Invalid/expired token: stay unauthenticated; protected routes resolve to 401.
+                // Invalid/expired/wrong-type token: stay unauthenticated; protected routes resolve to 401.
                 SecurityContextHolder.clearContext();
             }
         }

@@ -2,7 +2,7 @@
 
 Living document. Update at the end of every sprint. Reflects what is actually built and running, not what is planned. Plan lives in `01-development-plan.md`; this file is the source of truth for "where are we now".
 
-Last updated: 2026-06-23 (Sprint 28 - Phase 15 T1: outbox poison-row dead-lettering. `common-outbox` relay now classifies failures — poison/permanent rows → `status='DEAD'` + `outbox_dead_total`; transient still break+retry with a max-attempts backstop — so one unrelayable row can no longer stall a service's entire event publishing. Reproduced first, then fixed; verified on compose-PG against the real relay.)
+Last updated: 2026-06-23 (Sprint 29 - Phase 16 T1: JWT moved from a shared HS256 secret to RS256 with a single issuer. identity-service is the sole private-key holder, signs user tokens with an active `kid`, and publishes public keys at `/v1/.well-known/jwks.json`; every other service verifies via JWKS. Algorithm allowlist pinned in code to RS256 (RFC 8725) — `alg=none`/HS256/validly-signed-RS384/512 all rejected before signature checking. Shared `HEIMCALL_JWT_SECRET` removed everywhere (hard cut); helm updated. Verified unit + cross-service runtime on real Kafka/PG.)
 
 ## 1. Snapshot
 
@@ -675,10 +675,30 @@ identical to poison); replayable + alerted. Tested on compose-PG against the rea
 good row PUBLISHED same round; transient→break+retry then backstop-DEAD; Phase 12 ordering regression
 still green. See plan Phase 15.
 
+**Phase 16 - Security Hardening** (T1 done): closing the two highest-risk open security findings as one
+trust model (asymmetric issuer + scoped service identity + NetworkPolicy). **T1 done**: JWTs moved from a
+shared HS256 secret (any verifier could forge) to **RS256 with a single issuer**. `identity-service` is the
+sole holder of the RSA private key; it signs user access/refresh tokens (active `kid`) and publishes the
+public keys at `GET /v1/.well-known/jwks.json` (+ authorization-server metadata). Every other service
+verifies via that JWKS (`JwksKeyResolver`: cached, refetch-on-unknown-`kid`, single-flight); the signer
+verifies in-process (`LocalKeyResolver`, no self-HTTP). The old single `JwtSupport` was split into
+`JwtKeys`/`JwtIssuer`/`JwtVerifier` + `PublicKeyResolver` + `PemKeys`/`JwtClaims`. **Algorithm allowlist is
+pinned in code** (RFC 8725 §3.1): the verifier fixes the accepted alg to the constant `RS256` and rejects
+anything else *before* signature checking — `alg=none`, HS256, and even a validly-signed RS384/RS512 token
+are refused; the `alg` header only triggers a rejection, never selects the algorithm; JWK `alg`/`use` are
+advisory and never consulted. Also validates `iss`/`exp`/`nbf`/`aud`/`token_use` (refresh can't auth a
+resource endpoint). The shared `HEIMCALL_JWT_SECRET` was **removed everywhere (hard cut)** — identity keeps
+the private key, the six verifiers keep only `heimcall.jwt.jwks-uri`; helm updated to match. Verified: unit
+`JwtT1Test` (10) + runtime on identity + incident (real Kafka/PG) — login mints an RS256 token, `/me` 200,
+no-token/garbage/refresh-as-access → 401, and **cross-service** incident verified it via identity's JWKS
+over HTTP (valid → 403 authz not 401; HS256-forged with the real `kid` → 401). See plan Phase 16.
+Still open in Phase 16: T2 (per-service scoped service tokens / client-credentials), T3 (enforce service
+auth on `/v1/internal/**` + key-resolve, replace `permitAll`), T4 (NetworkPolicy default-deny).
+
 New follow-ups surfaced this sprint: a stale `deadbeef` null-org message in `notification.requested.v1`
 (prior manual test) stalls notification-service's consumer — clean it / harden that consumer's error path;
 Testcontainers is unusable locally (docker-java API 1.32 vs daemon ≥1.40) so integration tests fall back to
 the compose PG — revisit if CI needs container-isolated tests.
 
 Plus cross-cutting hardening still open (Redis caches/cooldown, `processed_event` TTL,
-`reassign` + `IncidentAssignment`, JWT secret rotation/RS256).
+`reassign` + `IncidentAssignment`; JWT secret rotation/RS256 now closed by Phase 16 T1).

@@ -1497,6 +1497,123 @@ theoretical. The test was then flipped to assert the fixed behavior.
     regression still passes. The characterization test was mutation-proven (it failed on the pre-fix
     relay, passes on the fixed one).
 
+## Phase 16 - Security Hardening (asymmetric issuer + scoped service identity + NetworkPolicy)
+
+Goal: close the two highest-risk open security findings as one coherent trust model. Today (1) all services
+verify user JWTs with the **same shared HS256 secret** (`HEIMCALL_JWT_SECRET`) — any service that can
+*verify* a token can also *forge* one (symmetric-MAC blast radius; OWASP/RFC 8725 both call this out), and
+(2) every `/v1/internal/**` endpoint plus `POST /v1/integration-keys/resolve` is `permitAll()` with
+inter-service `RestClient` calls carrying **no credentials at all** — anything on the pod network reads
+routing / on-call / membership data, and `key-resolve` is even reachable through the gateway from outside
+(`identity` route `/v1/integration-keys/**`), unauthenticated.
+
+These two findings are one finding: the fix for the symmetric-secret problem (a single **asymmetric**
+issuer) is also the foundation that makes per-service, audience- and scope-bound **service tokens**
+possible. So the phase is sequenced trust-spine first, then identity, then enforcement, then network.
+
+**Design decisions (locked 2026-06-23):**
+- **Single issuer, asymmetric.** `identity-service` holds one RSA private key and is the *only* signer of
+  both user tokens and service tokens. Everyone else verifies with the public key (JWKS) and can never mint.
+  This is the whole point — it removes the "any verifier can forge" property of the shared HS256 secret.
+- **One `iss`, distinguish by claims** (RFC 9068 JWT access-token profile). Same `iss` for both token
+  classes; verifiers separate them by `token_use` (`user_access` / `user_refresh` / `service`), target by
+  `aud`, and operation by `scope`. User access token: `aud=heimcall-api`, `token_use=user_access`. Service
+  token: `aud=<callee-service>`, `token_use=service`, `scope=<dotted-perm>`, plus `sub=<caller-service>`
+  and `jti` (audit/trace; `jti` is **not** replay/revocation on its own — that is a deferred mechanism).
+- **RS256-only verification.** Verifiers pin `alg=RS256` and reject `alg=none`, HS256, and any
+  header-chosen algorithm — this is the alg-confusion defense (attacker feeding the public key as an HMAC
+  secret), the single most important hardening in T1 (RFC 8725 BCP).
+- **Hard cut, no dual-accept window.** Heimcall is pre-production (no live user base; 1h access / 30d
+  refresh). A transition window where verifiers accept *both* HS256 and RS256 would keep the forge risk
+  open for the duration. Instead, cut over in one change: HS256 acceptance is removed entirely, no verifier
+  ever honors both. Cost: existing refresh tokens are invalidated → re-login. Acceptable pre-prod; it is the
+  strictly safer path and avoids the migration ceremony a live system would need.
+- **`X-User-Id` is never a trust boundary.** A user-context internal call (e.g. membership check) carries
+  two identities — the service token (caller) *and* the user's access token — and the callee derives the
+  user `sub` from the verified user JWT, not from a header.
+- **Out of scope (next horizon, noted not built):** mTLS / SPIFFE-SPIRE workload identity, token
+  revocation / introspection, sender-constrained tokens. NetworkPolicy (T4) is L3/L4 defense-in-depth, not
+  an identity mechanism, and only enforced if the CNI honors it.
+
+### Ticket breakdown
+
+- **T1 (DONE)** - **RS256 + JWKS trust spine.** The foundation; T2 deliberately kept out. Delivered:
+  - `common-security` was split out of the old single HS256 `JwtSupport` (deleted) into: `JwtKeys` (signer's
+    RSA key holder — active + retired `kid`, produces the JWKS), `JwtIssuer` (RS256 sign with `kid` header,
+    `iss`/`aud`/`token_use`), `JwtVerifier` (verify), `PublicKeyResolver` with `LocalKeyResolver` (signer,
+    no self-HTTP) and `JwksKeyResolver` (HTTP, cached, refetch-on-unknown-`kid`, single-flight), plus
+    `PemKeys` (PKCS#8/X.509 PEM, tolerates `\n` escapes) and `JwtClaims` (constants).
+  - `identity-service` is the sole signer: loads the RSA private key (dev key committed at
+    `resources/dev/jwt-dev-private-key.pem`; **prod: `HEIMCALL_JWT_PRIVATE_KEY` from a Secret/KMS**), signs
+    user access + refresh tokens RS256 with the active `kid`, and exposes `GET /v1/.well-known/jwks.json`
+    (active + retired public keys) + `GET /v1/.well-known/oauth-authorization-server` metadata.
+  - **Algorithm allowlist pinned in code** (RFC 8725 §3.1): `JwtVerifier.Rs256KeyLocator` fixes the accepted
+    alg to the constant `RS256` and rejects anything else *before* signature checking — `alg=none`, HS256,
+    and even a cryptographically valid RS384/RS512 token are refused. The token `alg` header only selects a
+    rejection, never the verification algorithm; the JWK `alg`/`use` members are advisory and never consulted.
+    Also validates `iss`/`exp`/`nbf`/`aud` and `token_use` (a refresh token can never authenticate a resource
+    endpoint).
+  - The shared `HEIMCALL_JWT_SECRET` is **removed everywhere (hard cut)**: identity keeps only the private
+    key; the six other services keep only `heimcall.jwt.jwks-uri`. Helm updated (`jwt-private-key` secret +
+    `HEIMCALL_JWT_KEY_ID` on identity; `HEIMCALL_JWT_JWKS_URI` on every verifier).
+  - Acceptance verified — unit (`JwtT1Test`, 10): issue/verify, `alg=none`, HS256-forge, validly-signed
+    RS512 rejected by the allowlist (not a sig failure), unknown `kid`, expired, wrong-`aud`,
+    refresh-as-access, rotation active→retired overlap, JWKS produce→consume round-trip. Runtime (identity +
+    incident on real Kafka/PG): JWKS serves RS256/`kid`; login mints an RS256 token (`iss`/`aud`/`token_use`
+    correct); `/me` 200; no-token/garbage/refresh-as-access → 401; refresh endpoint 200; **cross-service**
+    incident verified the token via identity's JWKS over HTTP (valid → 403 authz, not 401), garbage → 401,
+    HS256-forged with the real `kid` → 401.
+
+- **T2 (SPEC)** - **Service identity / client-credentials issuance.** `identity-service` mints short-lived
+  RS256 service tokens. Scope:
+  - A token endpoint authenticated by a **per-service** credential (`client_id` + secret, sourced from a
+    Kubernetes Secret, compared constant-time — **not** one shared token). Decide between a hand-rolled
+    `POST /v1/internal/token` vs. a spec-shaped OAuth2 `client_credentials` / `client_secret_basic` endpoint
+    so Spring Security's `OAuth2AuthorizedClientManager` can consume it on the client side (less custom
+    code, more standard) — finalize in this ticket.
+  - Issued service token: `iss` (same as user tokens), `sub=<caller-service>`, `aud=[<callee-service>]`,
+    `scope=<space-delimited dotted perms>`, `token_use=service`, short `exp`, `jti`.
+  - Define the **aud/scope matrix** — per internal endpoint, the required `aud` (the callee) and `scope`:
+    ```text
+    identity.membership.read         incident,escalation -> identity  (member check)
+    identity.team-members.read       escalation          -> identity  (team roster)
+    identity.integration-key.resolve integration         -> identity  (key resolve)
+    catalog.routing.resolve          incident            -> catalog   (routing)
+    schedule.on-call.read            escalation          -> schedule  (on-call)
+    escalation.policy.read           catalog             -> escalation (policy exists, server-side validate)
+    ```
+    so `integration`'s token (aud=identity, scope=integration-key.resolve) cannot call routing, and a
+    `catalog` token cannot resolve integration keys.
+  - Acceptance: each caller obtains a service token scoped to exactly the callee+operation it needs; a token
+    minted for one `aud` is rejected at another; an out-of-scope call is rejected; per-service credentials
+    are independently rotatable; the dev secret default is weak-and-visible (override in prod).
+
+- **T3 (SPEC)** - **Enforce on internal endpoints + client wiring.** Replace `permitAll` with real authz.
+  - `common-security`: `/v1/internal/**` and `key-resolve` require a valid **service token** whose `aud`
+    matches *this* service and whose `scope` includes the endpoint's required permission (method-level or a
+    small per-route map). `permitAll` for these paths is removed from `HeimcallSecurityAutoConfiguration`.
+  - Each inter-service client attaches the service token (`Authorization: Bearer <service>` for machine
+    calls; for user-context calls, `Authorization: Bearer <user>` **plus** `X-Internal-Authorization:
+    Bearer <service>`, so the callee verifies *both* "which service" and "on behalf of which user", deriving
+    the user `sub` from the verified user JWT — `X-User-Id` drops as a trust input).
+  - Client token cache keyed by `{aud, scope-set}`, refreshed a safety margin before `exp`, with
+    single-flight so a cold pod does not stampede the token endpoint.
+  - The gateway must never route `/v1/internal/**` externally (already true — verify and lock with a test);
+    `key-resolve`, which *is* externally reachable through the gateway today, is now service-token-gated.
+  - Acceptance: an unauthenticated `/v1/internal/**` or `key-resolve` call → 401/403; a valid scoped
+    service token → 200; a wrong-`aud` or out-of-scope service token → 403; the full alert→incident→
+    escalation→notification flow still works end-to-end with every hop now carrying a scoped service token;
+    a user-context membership check rejects a forged `X-User-Id` (only the signed user JWT is honored).
+
+- **T4 (SPEC)** - **NetworkPolicy default-deny (helm).** Defense-in-depth, last. Treat as a connection
+  inventory, not a manifest-writing exercise: before default-deny, enumerate every required flow — DNS,
+  PostgreSQL, Kafka, Redis, identity + other internal service calls, OTLP/tracing, Prometheus scrape,
+  Mailhog/SMTP, and notification's outbound webhook egress. Then `helm/heimcall` gets default-deny
+  ingress/egress with explicit allow rules only for those pairs/ports, plus gateway→service ingress.
+  Acceptance: with policies applied on kind, the full e2e flow still works (nothing starved by a missing
+  allow rule); a pod-to-pod call to a *non-allowed* pair is dropped; documented that enforcement depends on
+  the CNI.
+
 ## 10. Suggested Repository Structure
 
 ```text

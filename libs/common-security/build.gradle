@@ -12,4 +12,7 @@ dependencies {
     implementation 'org.springframework.boot:spring-boot-autoconfigure'
     compileOnly 'jakarta.servlet:jakarta.servlet-api'
     annotationProcessor 'org.springframework.boot:spring-boot-configuration-processor'
+
+    // Serialize the JWKS document in the produce->consume round-trip test (the way Spring MVC does at runtime).
+    testImplementation 'com.fasterxml.jackson.core:jackson-databind'
 }
