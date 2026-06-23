@@ -1,6 +1,7 @@
 package com.urunsiyabend.heimcall.common.outbox;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.micrometer.core.instrument.MeterRegistry;
 import io.micrometer.tracing.Tracer;
 import org.apache.kafka.clients.producer.ProducerConfig;
 import org.apache.kafka.common.serialization.ByteArraySerializer;
@@ -38,9 +39,10 @@ public class HeimcallOutboxAutoConfiguration {
 
     @Bean
     public OutboxRelay outboxRelay(JdbcTemplate jdbcTemplate, KafkaProperties kafkaProperties,
-                                   ObjectMapper objectMapper,
+                                   ObjectMapper objectMapper, ObjectProvider<MeterRegistry> meterRegistryProvider,
                                    @Value("${heimcall.outbox.batch-size:100}") int batchSize,
-                                   @Value("${heimcall.outbox.publish-timeout-ms:10000}") long publishTimeoutMs) {
+                                   @Value("${heimcall.outbox.publish-timeout-ms:10000}") long publishTimeoutMs,
+                                   @Value("${heimcall.outbox.max-attempts:10}") int maxAttempts) {
         Map<String, Object> producerProps = kafkaProperties.buildProducerProperties(null);
         // Never-lose on the relay leg: confirmed, idempotent writes; raw byte[] value (the appender
         // already serialized the payload, and the type lives in the __TypeId__ header).
@@ -50,7 +52,8 @@ public class HeimcallOutboxAutoConfiguration {
         producerProps.put(ProducerConfig.VALUE_SERIALIZER_CLASS_CONFIG, ByteArraySerializer.class);
         KafkaTemplate<String, byte[]> relayTemplate = new KafkaTemplate<>(
                 new DefaultKafkaProducerFactory<>(producerProps, new StringSerializer(), new ByteArraySerializer()));
-        return new OutboxRelay(jdbcTemplate, relayTemplate, objectMapper, batchSize, publishTimeoutMs);
+        return new OutboxRelay(jdbcTemplate, relayTemplate, objectMapper, batchSize, publishTimeoutMs,
+                maxAttempts, meterRegistryProvider.getIfAvailable());
     }
 
     @Bean

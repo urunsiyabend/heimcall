@@ -2,7 +2,7 @@
 
 Living document. Update at the end of every sprint. Reflects what is actually built and running, not what is planned. Plan lives in `01-development-plan.md`; this file is the source of truth for "where are we now".
 
-Last updated: 2026-06-20 (Sprint 27 - Phase 14 T2 + **Phase 14 complete**: Redis activation. T2 = notification cooldown (collapse repeat pages for the same incident+user+channel within a window via Redis SET NX EX, fail-open). T1 was gateway rate limiting. Redis now wired into gateway + notification-service.)
+Last updated: 2026-06-23 (Sprint 28 - Phase 15 T1: outbox poison-row dead-lettering. `common-outbox` relay now classifies failures — poison/permanent rows → `status='DEAD'` + `outbox_dead_total`; transient still break+retry with a max-attempts backstop — so one unrelayable row can no longer stall a service's entire event publishing. Reproduced first, then fixed; verified on compose-PG against the real relay.)
 
 ## 1. Snapshot
 
@@ -634,8 +634,10 @@ silently fails to page anyone for a routing reason. Driven by a system-wide audi
 - Open audit findings ranked for later phases (not silent-paging): ~~worker double-execution on multi-replica~~
   **DONE Phase 11 T1** (escalation/notification workers `FOR UPDATE SKIP LOCKED` per-task claim → exactly-once
   across replicas), ~~cross-topic lifecycle ordering race~~ **DONE Phase 12 T1** (single ordered
-  `incident.lifecycle.v1` topic + outbox per-aggregate ordering guard), outbox poison-row head-of-line
-  block (no max-attempts/DLT), unbounded tables (alert_occurrence/timeline/raw_inbound_event/processed_event/
+  `incident.lifecycle.v1` topic + outbox per-aggregate ordering guard), ~~outbox poison-row head-of-line
+  block (no max-attempts/DLT)~~ **DONE Phase 15 T1** (relay classifies failures → poison/permanent rows
+  dead-lettered `status='DEAD'` + `outbox_dead_total`, transient still break+retry with a max-attempts
+  backstop), unbounded tables (alert_occurrence/timeline/raw_inbound_event/processed_event/
   notification_delivery), `/v1/internal/**` + key-resolve `permitAll` with no service auth/NetworkPolicy,
   single shared HS256 secret, SSE in-heap vs HPA min=2.
 
@@ -654,6 +656,24 @@ dispatch. The producer-side half (incident-service HPA min 2 → two relay insta
 `common-outbox` relay **per-aggregate ordering guard** (`NOT EXISTS lower-id PENDING same aggregate_id`),
 so per-aggregate publish order holds across instances. Tested: PG locking test (the guard) + dispatch unit
 test + e2e (trigger+immediate-ACK → CANCELED, no page; regression still pages). See plan Phase 12.
+
+**Phase 15 - Outbox Poison-Row Dead-Lettering** (T1 done): a single unrelayable outbox row no longer
+stalls a service's entire event publishing. Reproduced first (real `OutboxRelay` vs compose-PG: a
+corrupt-headers row as lowest id kept the whole relay PENDING, attempts climbing, `kafka.send` never
+called for any row), then fixed. The relay now **classifies** failures instead of blindly `break`ing:
+a pre-send poison (corrupt `headers`) or a permanent broker rejection (`RecordTooLargeException`,
+`SerializationException`, `InvalidTopicException`, `UnknownTopicOrPartitionException`; cause chain scanned)
+→ `status='DEAD'` + `continue` (rows behind it keep flowing); a transient failure (outage/timeout) keeps
+the old `attempts++` + `break` (retry next poll), with a `heimcall.outbox.max-attempts` (default 10)
+**backstop** that dead-letters an unforeseen always-failing row so it can never stall forever. DLT is
+in-table (`DEAD` value — no new table/topic/Flyway; the claim + ordering-guard SQL already filter on
+`PENDING`, so a DEAD row is invisible to the relay and *unblocks* its aggregate); visibility via an
+`outbox_dead_total` Micrometer counter (optional `MeterRegistry`) + loud ERROR log; a DEAD row is
+replayable by flipping it back to PENDING. Accepted trade-off: a total broker outage longer than
+`max-attempts × per-poll-time` (~100s+ at the 10s publish-timeout) can dead-letter the head row (looks
+identical to poison); replayable + alerted. Tested on compose-PG against the real relay: poison→DEAD +
+good row PUBLISHED same round; transient→break+retry then backstop-DEAD; Phase 12 ordering regression
+still green. See plan Phase 15.
 
 New follow-ups surfaced this sprint: a stale `deadbeef` null-org message in `notification.requested.v1`
 (prior manual test) stalls notification-service's consumer — clean it / harden that consumer's error path;

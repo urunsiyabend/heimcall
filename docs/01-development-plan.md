@@ -1445,6 +1445,58 @@ Sliced per concern; **T1 first**, verified + reviewed before T2 is specced in de
     key; `cooldown.enabled=false` → never suppressed; Redis down → fail-open (delivery still created). Verify
     on the live fleet against real Redis.
 
+## Phase 15 - Outbox Poison-Row Dead-Lettering (close the open audit finding)
+
+Goal: a single unrelayable outbox row must never stall a service's entire event publishing. The
+`common-outbox` relay claims PENDING rows oldest-first (per-aggregate ordering guard) and, on any send
+failure, `break`s the round and leaves the row PENDING for the next poll. That is correct for a transient
+broker outage but **fatal for a poison row** — a row that can never succeed (corrupt `headers` JSON →
+`parseHeaders` throws; payload over `max.message.bytes`; unknown topic). Since the poison row is the
+lowest-id PENDING, every poll re-claims it first, fails, and `break`s — so **every row behind it (even a
+different aggregate) is never published**. One bad row = the service's outbox is permanently down. There
+was no max-attempts / DLT (open audit finding since Phase 10).
+
+**Reproduced first (characterization test):** drove the real `OutboxRelay.relay()` against compose-PG
+with a corrupt-headers row as the lowest id and a good row (different aggregate) behind it. After 5 poll
+cycles the poison row was still PENDING (attempts=5, never dead-lettered) and the good row was still
+PENDING with attempts=0 — `kafka.send` was never called for *any* row. Total stall confirmed, not
+theoretical. The test was then flipped to assert the fixed behavior.
+
+- **T1 (DONE)** - **poison-row dead-lettering in the `common-outbox` relay**. Failure is classified, not
+  blindly retried:
+  - **Pre-send poison** (corrupt `headers` → `parseHeaders` throws): the row is flagged `DEAD` immediately
+    and the loop `continue`s — it never blocks the rows behind it.
+  - **Permanent broker rejection** (`RecordTooLargeException`, `SerializationException`,
+    `InvalidTopicException`, `UnknownTopicOrPartitionException`; the cause chain is scanned): no retry can
+    fix it → `DEAD` + `continue`.
+  - **Transient failure** (broker outage / timeout): unchanged behavior — `attempts++` and `break` the
+    round (the rest of the batch almost certainly fails the same way; spinning wastes the poll; the row
+    stays PENDING and retries next poll). **Backstop:** once a transiently-failing row burns through
+    `heimcall.outbox.max-attempts` (default **10**) it is dead-lettered anyway, so an *unforeseen*
+    always-failing row (a permanent error we did not classify) can still never stall forever.
+  - **DLT mechanics:** in-table `status='DEAD'` — no new table, no new Kafka DLT topic, no Flyway (the
+    `status` column already exists; `DEAD` is just a new value). The relay's claim/ordering SQL already
+    filters on `status='PENDING'`, so DEAD rows are invisible to it and the per-aggregate ordering guard
+    (`NOT EXISTS lower-id PENDING`) stops counting a dead-lettered row → the aggregate's next row becomes
+    eligible (dead-lettering *unblocks* the aggregate, at the documented cost of dropping that one event
+    from the stream). A `outbox_dead_total` Micrometer counter (optional `MeterRegistry`, injected via
+    `ObjectProvider` so the lib stays dependency-light) + a loud ERROR log give visibility; alert on it.
+    A DEAD row is replayable by flipping it back to PENDING after the cause is fixed.
+  - **Accepted trade-off (documented):** a *total* broker outage longer than
+    `max-attempts × per-poll-time` can dead-letter the head-of-line row (it looks identical to an
+    unforeseen poison row from the relay's side). With the 10s publish-timeout this is ~100s+ of full
+    outage before the head row is sacrificed; the row is replayable and the counter/log fire. Tightening
+    the false-positive window (e.g. only counting non-connectivity failures toward the backstop) is the
+    deferred evolution if it ever bites.
+  - Config: `heimcall.outbox.max-attempts` (default 10).
+  - Acceptance (verified on compose-PG, real `OutboxRelay`): corrupt-headers row as lowest id → flagged
+    `DEAD` (attempts=1, counter +1) and the good row behind it is PUBLISHED in the *same* round
+    (`kafka.send` called only for the good row); a transiently-failing row stays PENDING and breaks the
+    round (good row behind it correctly starved — outage semantics) for `maxAttempts-1` polls, then is
+    dead-lettered on the `maxAttempts`-th and the good row flows; the Phase 12 per-aggregate ordering
+    regression still passes. The characterization test was mutation-proven (it failed on the pre-fix
+    relay, passes on the fixed one).
+
 ## 10. Suggested Repository Structure
 
 ```text

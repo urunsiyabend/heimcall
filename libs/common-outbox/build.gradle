@@ -18,6 +18,7 @@ dependencies {
     compileOnly 'org.apache.kafka:kafka-clients'
     compileOnly 'com.fasterxml.jackson.core:jackson-databind'
     compileOnly 'io.micrometer:micrometer-tracing'
+    compileOnly 'io.micrometer:micrometer-core'
     compileOnly 'org.slf4j:slf4j-api'
 
     annotationProcessor 'org.springframework.boot:spring-boot-configuration-processor'
@@ -26,4 +27,9 @@ dependencies {
     // real PostgreSQL (the local docker-compose instance by default) with two concurrent connections.
     // Skips cleanly (JUnit assumption) when no PostgreSQL is reachable.
     testImplementation 'org.postgresql:postgresql'
+    // Repro/spec: drive the real OutboxRelay (JdbcTemplate + KafkaTemplate + Jackson) against compose-PG.
+    testImplementation 'org.springframework:spring-jdbc'
+    testImplementation 'org.springframework.kafka:spring-kafka'
+    testImplementation 'com.fasterxml.jackson.core:jackson-databind'
+    testImplementation 'io.micrometer:micrometer-core'
 }
