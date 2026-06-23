@@ -14,6 +14,8 @@ infra:
   otlpTracingEndpoint: http://jaeger-collector:4318/v1/traces
   postgresHost: postgres
   postgresPort: "5432"
+  redisHost: redis
+  redisPort: "6379"
   uiOrigin: http://localhost:5173
 
 # Secrets. Defaults are DEV-ONLY — override in real envs (--set / sealed secret / external secret).
@@ -34,6 +36,8 @@ secrets:
     escalation: dev-escalation-secret
     integration: dev-integration-secret
     catalog: dev-catalog-secret
+    schedule: dev-schedule-secret
+    notification: dev-notification-secret
 
 # Applied to every service unless overridden in the per-service block below.
 defaults:
@@ -64,11 +68,54 @@ probes:
     periodSeconds: 10
     failureThreshold: 3
 
+# Phase 16 T4 — default-deny NetworkPolicy + per-pair allow-list (defense-in-depth, L3/L4).
+# Enforcement requires a policy-aware CNI (Cilium in our kind/staging verify; kindnet IGNORES policies).
+# Egress to BYO infra is allowed by PORT (not destination) so external Postgres/Kafka/Redis/Jaeger keep
+# working; inter-service REST is locked per caller->callee pair from the `calls` graph below.
+networkPolicy:
+  enabled: true
+  # Ports reachable on the egress side for shared infra (Postgres, Kafka, Redis, OTLP/Jaeger).
+  infraEgressPorts: [5432, 9092, 6379, 4318]
+  # Prometheus scrape source. Allowed to reach every service's actuator port. Identified by namespace label
+  # (kubernetes.io/metadata.name). Set monitoring.enabled=false if scraping is in-namespace / not used.
+  monitoring:
+    enabled: true
+    namespace: monitoring
+  # notification-service outbound webhook egress (user-configured endpoints). No FQDN allow-list is possible
+  # for arbitrary customer webhooks, so this is the documented SSRF-protected exception: egress to the public
+  # internet on 80/443 with cluster/private/link-local ranges explicitly denied (blocks SSRF to in-cluster
+  # and metadata services). Tighten to a proxy/FQDN allow-list if the webhook set ever becomes finite.
+  webhookEgress:
+    ports: [80, 443]
+    blockedCidrs:
+      - 10.0.0.0/8
+      - 172.16.0.0/12
+      - 192.168.0.0/16
+      - 169.254.0.0/16
+      - 100.64.0.0/10
+
 # Per-service overrides. `db` omitted => no datasource env injected (api-gateway).
+# Phase 16 T3/T4 per-service identity + topology:
+#   clientName     -> this service is a client_credentials CALLER; injects HEIMCALL_TOKEN_URI +
+#                     HEIMCALL_CLIENT_SECRET_<clientName>. Must match a secrets.serviceClientSecrets key.
+#   serviceName    -> this service is a token-verifying CALLEE (aud); injects HEIMCALL_SERVICE_NAME.
+#   calls          -> internal REST callees (service keys). Drives the NetworkPolicy allow graph. Every
+#                     caller also lists identity-service (the /oauth2/token mint hop).
+#   externalIngress-> accepts ingress from outside the mesh (gateway LoadBalancer).
+#   webhookEgress  -> gets the SSRF-guarded public egress rule.
 services:
   api-gateway:
     port: 8080
     serviceType: LoadBalancer
+    externalIngress: true
+    calls:
+      - identity-service
+      - service-catalog-service
+      - schedule-service
+      - integration-service
+      - incident-service
+      - escalation-service
+      - notification-service
     autoscaling:
       enabled: true
       minReplicas: 2
@@ -76,18 +123,36 @@ services:
   identity-service:
     port: 8083
     db: identity
+    serviceName: identity
+    calls: []
   service-catalog-service:
     port: 8084
     db: catalog
+    clientName: catalog
+    serviceName: catalog
+    calls:
+      - identity-service
+      - escalation-service
   schedule-service:
     port: 8085
     db: schedule
+    clientName: schedule
+    serviceName: schedule
+    calls:
+      - identity-service
   integration-service:
     port: 8081
     db: integration
+    clientName: integration
+    calls:
+      - identity-service
   incident-service:
     port: 8082
     db: incident
+    clientName: incident
+    calls:
+      - identity-service
+      - service-catalog-service
     autoscaling:
       enabled: true
       minReplicas: 2
@@ -95,6 +160,18 @@ services:
   escalation-service:
     port: 8086
     db: escalation
+    clientName: escalation
+    serviceName: escalation
+    calls:
+      - identity-service
+      - schedule-service
   notification-service:
     port: 8087
     db: notification
+    clientName: notification
+    webhookEgress: true
+    # SMTP egress to Mailhog (dev) / an external relay (prod). Mailhog/relay is BYO, not deployed by this
+    # chart — by-port allow so either destination works under default-deny.
+    extraEgressPorts: [1025]
+    calls:
+      - identity-service

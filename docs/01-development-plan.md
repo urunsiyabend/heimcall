@@ -1636,21 +1636,39 @@ possible. So the phase is sequenced trust-spine first, then identity, then enfor
     validated by T4's single kind e2e run. The gateway-never-routes-`/v1/internal` test lock moves with it
     (key-resolve is now scope-gated regardless of its gateway route).
 
-- **T4 (SPEC)** - **NetworkPolicy default-deny (helm) + T3 helm wiring.** Defense-in-depth, last. Treat as a
-  connection inventory, not a manifest-writing exercise: before default-deny, enumerate every required flow —
-  DNS, PostgreSQL, Kafka, Redis, identity + other internal service calls, **every caller → identity
-  `/oauth2/token`** (the T3 client_credentials mint is its own egress flow under default-deny), OTLP/tracing,
-  Prometheus scrape, Mailhog/SMTP, and notification's outbound webhook egress. Then `helm/heimcall` gets
-  default-deny ingress/egress with explicit allow rules only for those pairs/ports, plus gateway→service
-  ingress.
-  - **Carry the deferred T3 helm wiring here:** per-caller `HEIMCALL_CLIENT_SECRET_<self>` +
-    `HEIMCALL_TOKEN_URI` (identity `/oauth2/token`), callee `HEIMCALL_SERVICE_NAME`, and the
-    `schedule`/`notification` entries in `secrets.serviceClientSecrets` (consumed by identity). The single
-    full-fleet kind e2e validates both T3 (every hop tokened) and the network policies at once. Also lock the
-    gateway-never-routes-`/v1/internal` invariant with a test in this pass.
-  - Acceptance: with policies applied on kind, the full e2e flow still works (nothing starved by a missing
-    allow rule — including the token mint); a pod-to-pod call to a *non-allowed* pair is dropped; documented
-    that enforcement depends on the CNI.
+- **T4 (DONE)** - **NetworkPolicy default-deny (helm) + T3 helm wiring.** Defense-in-depth, last. Treated as
+  a connection inventory, not a manifest-writing exercise. **Locked decisions (2026-06-23):** policy-aware
+  CNI mandatory (kindnet ignores NetworkPolicy) → verify on **Cilium + Hubble**; full **per-pair**
+  least-privilege (each inter-service REST dependency is its own allow rule, not a blanket mesh-allow);
+  infra egress allowed **by port** (BYO/external Postgres/Kafka/Redis/OTLP stay reachable); notification's
+  outbound webhook egress is the **documented SSRF-protected exception** (no finite FQDN set for arbitrary
+  customer webhooks → public internet on 80/443 with private/cluster/link-local CIDRs denied). Delivered:
+  - `templates/networkpolicy.yaml` (gated `networkPolicy.enabled`): **18 policies** — fleet default-deny
+    ingress+egress; DNS egress (kube-system:53); infra egress by port (5432/9092/6379/4318); per-service
+    **ingress from its actual callers only** + **egress to its declared callees only**, generated from a
+    `calls` graph in `values.yaml` (the token-mint hop = caller→identity, already in every caller's `calls`);
+    gateway external ingress; configurable Prometheus ingress; notification SSRF webhook egress + SMTP 1025
+    via `extraEgressPorts`. Stable pod label `app.kubernetes.io/part-of=heimcall` for fleet selection.
+  - **Deferred T3 helm wiring carried here:** per-caller `HEIMCALL_TOKEN_URI` + `HEIMCALL_CLIENT_SECRET_<self>`
+    (from the secret), callee `HEIMCALL_SERVICE_NAME`, and `schedule`/`notification` in
+    `secrets.serviceClientSecrets`. Driven by per-service `clientName`/`serviceName` markers in values.
+  - **Redis wired** (was absent from helm entirely): `redis` in `deploy/kind/infra.yaml`, `infra.redis*`,
+    `REDIS_HOST/PORT` env for notification + api-gateway.
+  - **Gateway invariant test** `InternalRouteIsolationTest`: `/v1/internal/**` + `/oauth2/token` 404 at the
+    gateway (unrouted), a real route 5xx (routed) — internal surface is pod-to-pod only.
+  - **kind/Cilium scaffolding**: `deploy/kind/cluster.yaml` (disableDefaultCNI) + `README-netpol.md`
+    (Cilium 1.19.5 + Hubble install, archive image-load workaround for the containerd-snapshotter).
+  - Acceptance verified — `helm lint`/`template` clean (37 resources, 18 NetworkPolicies); full suite green
+    incl. the new gateway test. **Real-cluster e2e on Cilium+Hubble** (kind, full fleet, fresh RS256 images —
+    found+fixed stale pre-Phase-16 HS256 images mid-run): full fleet `Running 1/1` under default-deny (no
+    flow starved); product flow register→org→membership→key→ingest→**TRIGGERED**→ack→**RESOLVED** with the
+    live token hops (integration→identity key-resolve, incident→catalog routing); **negative** —
+    notification→identity:8083 connects (allowed), notification→incident:8082 **dropped** (timeout), Hubble
+    logs `Policy denied DROPPED (TCP Flags: SYN)`. Documented: enforcement depends on the CNI; webhook-SSRF +
+    SMTP rules present but not live-exercised (no webhook/contact-method in the flow); Prometheus ingress
+    rule present but `monitoring` ns not deployed.
+
+**Phase 16 complete** (T1-T4).
 
 ## 10. Suggested Repository Structure
 

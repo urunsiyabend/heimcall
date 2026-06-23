@@ -22,6 +22,8 @@ spec:
       labels:
         app.kubernetes.io/name: {{ $name }}
         app.kubernetes.io/instance: {{ $root.Release.Name }}
+        # Stable fleet label so NetworkPolicies (T4) select all heimcall pods regardless of release name.
+        app.kubernetes.io/part-of: heimcall
       annotations:
         prometheus.io/scrape: "true"
         prometheus.io/path: /actuator/prometheus
@@ -64,6 +66,28 @@ spec:
             # Verifier: fetch the issuer's public keys from identity-service's JWKS endpoint.
             - name: HEIMCALL_JWT_JWKS_URI
               value: "{{ include "heimcall.svcUrl" (dict "name" "identity-service" "root" $root) }}/v1/.well-known/jwks.json"
+            {{- end }}
+            {{- if $svc.serviceName }}
+            # Phase 16 T3: this callee verifies service tokens whose aud == its service-name.
+            - name: HEIMCALL_SERVICE_NAME
+              value: {{ $svc.serviceName | quote }}
+            {{- end }}
+            {{- if $svc.clientName }}
+            # Phase 16 T3: client_credentials caller — token mint endpoint + this caller's own secret.
+            - name: HEIMCALL_TOKEN_URI
+              value: "{{ include "heimcall.svcUrl" (dict "name" "identity-service" "root" $root) }}/oauth2/token"
+            - name: HEIMCALL_CLIENT_SECRET_{{ upper $svc.clientName }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "heimcall.fullname" $root }}-secrets
+                  key: service-client-secret-{{ $svc.clientName }}
+            {{- end }}
+            {{- if or (eq $name "notification-service") (eq $name "api-gateway") }}
+            # Phase 14/16: Redis (gateway rate-limit, notification cooldown).
+            - name: REDIS_HOST
+              value: {{ $root.Values.infra.redisHost | quote }}
+            - name: REDIS_PORT
+              value: {{ $root.Values.infra.redisPort | quote }}
             {{- end }}
             # Cross-service REST base-urls (resolved to cluster Service DNS).
             - name: IDENTITY_BASE_URL

@@ -1,0 +1,9 @@
+# Phase 16 T4 — kind cluster for NetworkPolicy verify. Default CNI (kindnet) is DISABLED because kindnet
+# does NOT enforce NetworkPolicy; Cilium is installed instead (see deploy/kind/README-netpol.md). Without a
+# policy-aware CNI the T4 policies render but are silently ignored.
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+networking:
+  disableDefaultCNI: true
+nodes:
+  - role: control-plane

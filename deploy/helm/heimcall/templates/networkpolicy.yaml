@@ -1,0 +1,150 @@
+{{- if .Values.networkPolicy.enabled }}
+{{- $root := . }}
+{{- $np := .Values.networkPolicy }}
+{{- $fleetSelector := dict "matchLabels" (dict "app.kubernetes.io/part-of" "heimcall") }}
+# Phase 16 T4 — default-deny + per-pair allow-list. Enforcement requires a policy-aware CNI (Cilium in our
+# verify; kindnet silently ignores these objects). NetworkPolicies are ADDITIVE — the default-deny below is
+# the floor, every other policy here only adds allowed flows on top of it.
+#
+# (1) Default-deny everything for the whole fleet.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "heimcall.fullname" $root }}-default-deny
+  labels:
+    {{- include "heimcall.labels" $root | nindent 4 }}
+spec:
+  podSelector: {{ $fleetSelector | toJson }}
+  policyTypes: [Ingress, Egress]
+---
+# (2) DNS egress for the whole fleet (CoreDNS in kube-system). Without this every name lookup fails closed.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "heimcall.fullname" $root }}-allow-dns
+  labels:
+    {{- include "heimcall.labels" $root | nindent 4 }}
+spec:
+  podSelector: {{ $fleetSelector | toJson }}
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - { protocol: UDP, port: 53 }
+        - { protocol: TCP, port: 53 }
+---
+# (3) Shared infra egress by PORT (not destination) so BYO/external Postgres, Kafka, Redis, OTLP all work.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "heimcall.fullname" $root }}-allow-infra-egress
+  labels:
+    {{- include "heimcall.labels" $root | nindent 4 }}
+spec:
+  podSelector: {{ $fleetSelector | toJson }}
+  policyTypes: [Egress]
+  egress:
+    - ports:
+        {{- range $np.infraEgressPorts }}
+        - { protocol: TCP, port: {{ . }} }
+        {{- end }}
+{{- range $name, $svc := .Values.services }}
+{{- $port := $svc.port }}
+{{- /* Reverse-resolve the callers of this service from every other service's `calls` graph. */}}
+{{- $callers := list }}
+{{- range $cn, $cs := $root.Values.services }}
+{{- if has $name (default (list) $cs.calls) }}
+{{- $callers = append $callers $cn }}
+{{- end }}
+{{- end }}
+---
+# (4) Ingress to {{ $name }} :{{ $port }} — only its REST callers{{ if $svc.externalIngress }} + external (gateway LB){{ end }}{{ if $np.monitoring.enabled }} + Prometheus{{ end }}.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "heimcall.fullname" $root }}-ingress-{{ $name }}
+  labels:
+    {{- include "heimcall.labels" $root | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: {{ $name }}
+  policyTypes: [Ingress]
+  ingress:
+    {{- if $callers }}
+    # in-mesh callers
+    - from:
+        {{- range $callers }}
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: {{ . }}
+        {{- end }}
+      ports:
+        - { protocol: TCP, port: {{ $port }} }
+    {{- end }}
+    {{- if $svc.externalIngress }}
+    # external traffic (LoadBalancer / Ingress) — gateway is the only public entrypoint
+    - ports:
+        - { protocol: TCP, port: {{ $port }} }
+    {{- end }}
+    {{- if $np.monitoring.enabled }}
+    # Prometheus scrape of /actuator/prometheus (served on the http port)
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ $np.monitoring.namespace }}
+      ports:
+        - { protocol: TCP, port: {{ $port }} }
+    {{- end }}
+{{- if or (default (list) $svc.calls) $svc.webhookEgress $svc.extraEgressPorts }}
+---
+# (5) Egress from {{ $name }} — only its declared REST callees{{ if $svc.webhookEgress }} + SSRF-guarded webhook egress{{ end }}.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "heimcall.fullname" $root }}-egress-{{ $name }}
+  labels:
+    {{- include "heimcall.labels" $root | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: {{ $name }}
+  policyTypes: [Egress]
+  egress:
+    {{- range $callee := (default (list) $svc.calls) }}
+    {{- $calleePort := (index $root.Values.services $callee).port }}
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: {{ $callee }}
+      ports:
+        - { protocol: TCP, port: {{ $calleePort }} }
+    {{- end }}
+    {{- if $svc.extraEgressPorts }}
+    # Service-specific infra egress by port (e.g. SMTP to Mailhog/relay).
+    - ports:
+        {{- range $svc.extraEgressPorts }}
+        - { protocol: TCP, port: {{ . }} }
+        {{- end }}
+    {{- end }}
+    {{- if $svc.webhookEgress }}
+    # Documented SSRF-protected exception: arbitrary customer webhooks (no finite FQDN set), so allow the
+    # public internet on 80/443 with all private / cluster / link-local ranges denied.
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              {{- range $np.webhookEgress.blockedCidrs }}
+              - {{ . }}
+              {{- end }}
+      ports:
+        {{- range $np.webhookEgress.ports }}
+        - { protocol: TCP, port: {{ . }} }
+        {{- end }}
+    {{- end }}
+{{- end }}
+{{- end }}
+{{- end }}
