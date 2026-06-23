@@ -3,6 +3,7 @@ package com.urunsiyabend.heimcall.catalog.web;
 import com.urunsiyabend.heimcall.catalog.domain.MonitoredService;
 import com.urunsiyabend.heimcall.catalog.domain.MonitoredServiceRepository;
 import com.urunsiyabend.heimcall.catalog.domain.OrgRoutingDefaultRepository;
+import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.RequestMapping;
@@ -44,6 +45,7 @@ public class InternalController {
     /** Resolve a routingKey to its escalation policy. 404 only on a definitive no-match (no specific
      *  service with a policy AND no org default). */
     @GetMapping("/organizations/{orgId}/routing")
+    @PreAuthorize("hasAuthority('SCOPE_catalog.routing.resolve')")
     public RoutingResolution resolve(@PathVariable UUID orgId, @RequestParam String routingKey) {
         Optional<MonitoredService> match = services.findByOrganizationIdAndRoutingKey(orgId, routingKey);
 

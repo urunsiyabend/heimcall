@@ -1588,31 +1588,69 @@ possible. So the phase is sequenced trust-spine first, then identity, then enfor
     minted for one `aud` is rejected at another; an out-of-scope call is rejected; per-service credentials
     are independently rotatable; the dev secret default is weak-and-visible (override in prod).
 
-- **T3 (SPEC)** - **Enforce on internal endpoints + client wiring.** Replace `permitAll` with real authz.
-  - `common-security`: `/v1/internal/**` and `key-resolve` require a valid **service token** whose `aud`
-    matches *this* service and whose `scope` includes the endpoint's required permission (method-level or a
-    small per-route map). `permitAll` for these paths is removed from `HeimcallSecurityAutoConfiguration`.
-  - Each inter-service client attaches the service token (`Authorization: Bearer <service>` for machine
-    calls; for user-context calls, `Authorization: Bearer <user>` **plus** `X-Internal-Authorization:
-    Bearer <service>`, so the callee verifies *both* "which service" and "on behalf of which user", deriving
-    the user `sub` from the verified user JWT — `X-User-Id` drops as a trust input).
-  - Client token cache keyed by `{aud, scope-set}`, refreshed a safety margin before `exp`, with
-    single-flight so a cold pod does not stampede the token endpoint.
-  - The gateway must never route `/v1/internal/**` externally (already true — verify and lock with a test);
-    `key-resolve`, which *is* externally reachable through the gateway today, is now service-token-gated.
-  - Acceptance: an unauthenticated `/v1/internal/**` or `key-resolve` call → 401/403; a valid scoped
-    service token → 200; a wrong-`aud` or out-of-scope service token → 403; the full alert→incident→
-    escalation→notification flow still works end-to-end with every hop now carrying a scoped service token;
-    a user-context membership check rejects a forged `X-User-Id` (only the signed user JWT is honored).
+- **T3 (DONE)** - **Enforce on internal endpoints + client wiring.** `permitAll` replaced with real authz.
+  - **Decision: pure service-token, no dual-token.** The locked design carried a user-context variant
+    (`Authorization: Bearer <user>` + `X-Internal-Authorization: Bearer <service>`). It was dropped because
+    the actual internal surface doesn't need it: **no internal endpoint derives the acting user from a
+    header** — every one takes the user/team as an explicit path/param (`/members/{userId}` etc.) answering a
+    pure data lookup, and the call sites are **machine-context** (incident's routing resolve runs in the Kafka
+    alert→incident handler, integration's key-resolve under key-authenticated ingest, escalation's engine on
+    scheduled work) where no user JWT exists. So every internal call carries only
+    `Authorization: Bearer <service-token>`. (Documented: a future header-derived-user endpoint would have to
+    re-introduce the user JWT.) The "forged `X-User-Id`" acceptance holds by construction — internal endpoints
+    never read that header and the filter strips it on the service-token path.
+  - `common-security`: a service token addressed to this service is now accepted by `JwtAuthenticationFilter`
+    (new `heimcall.jwt.service-name` = this callee's `aud`), which maps the token's `scope` claim to
+    `SCOPE_*` authorities and sets the caller (`sub`) as principal — **no `X-User-Id` injected**.
+    `/v1/internal/**` and `key-resolve` flipped from `permitAll` to `authenticated()`; the exact scope is
+    pinned per endpoint with method security (`@EnableMethodSecurity` + `@PreAuthorize("hasAuthority('SCOPE_…')")`).
+    A user token authenticates but has no `SCOPE_*`, so it is rejected at method security (403) — internal
+    endpoints are machine-only.
+  - **Scope per endpoint:** `members/{userId}`→`identity.membership.read`, `teams/{teamId}`→
+    **`identity.team.read`** (new scope; team-existence kept distinct from member-existence),
+    `teams/{teamId}/members`→`identity.team-members.read`, key-resolve→`identity.integration-key.resolve`,
+    catalog routing→`catalog.routing.resolve`, escalation policy→`escalation.policy.read`,
+    schedule on-call→`schedule.on-call.read`.
+  - **T2 matrix gaps closed** in `AuthorizationServerConfig.CLIENT_SCOPES`: `catalog` gained
+    `identity.membership.read` + `identity.team.read`; `schedule` and `notification` (absent in T2 yet both
+    call identity membership) added with `identity.membership.read`; `escalation` gained `identity.team.read`.
+  - Client side: each caller pulls `spring-boot-starter-oauth2-client` and declares one
+    `spring.security.oauth2.client.registration.<callee>` per callee (named after the callee, scopes targeting
+    only it — honoring the single-audience invariant). A shared `ServiceTokenClients` factory +
+    `ServiceTokenInterceptor` (new in common-security, on its own `@AutoConfigureAfter` the OAuth2-client
+    autoconfig so `@ConditionalOnBean(ClientRegistrationRepository)` resolves) attaches the right token to each
+    `*Client`. Cache + refresh-before-`exp` come from Spring's
+    `AuthorizedClientServiceOAuth2AuthorizedClientManager` (machine-context, client_credentials).
+  - Acceptance verified — unit (`JwtT3Test`: filter maps scope→authorities, wrong-`aud`→unauthenticated,
+    caller-only service never accepts a service token, spoofed `X-User-Id` stripped) + `InternalEndpointAuthzTest`
+    (identity, real `/oauth2/token` mint → gated `/v1/internal/.../members`: no-token→401, wrong-`aud`→401,
+    wrong-scope→403, correct→204) + full suite green. Runtime (real PG/Kafka, bootJars): identity gate via curl
+    (no-token→401, correct scope→handler, wrong-`aud`→401, wrong-scope→403, key-resolve no-token→401,
+    key-resolve scoped→handler); callers boot clean with the new wiring; **interceptor proven end-to-end** —
+    integration ingest → real identity call, and with a deliberately wrong client secret the stack trace shows
+    `ServiceTokenInterceptor → AuthorizedClientManager.authorize → token mint → 401 invalid_client`, proving the
+    interceptor genuinely mints + attaches a `client_credentials` token.
+  - **Deferred to T4 (helm/k8s ticket):** the chart's T3 env wiring (per-caller `HEIMCALL_CLIENT_SECRET_<self>`
+    + `HEIMCALL_TOKEN_URI`, callee `HEIMCALL_SERVICE_NAME`, `schedule`/`notification` service-client secrets)
+    and the full-fleet **kind e2e** with every hop tokened — folded into T4 since both touch helm and are
+    validated by T4's single kind e2e run. The gateway-never-routes-`/v1/internal` test lock moves with it
+    (key-resolve is now scope-gated regardless of its gateway route).
 
-- **T4 (SPEC)** - **NetworkPolicy default-deny (helm).** Defense-in-depth, last. Treat as a connection
-  inventory, not a manifest-writing exercise: before default-deny, enumerate every required flow — DNS,
-  PostgreSQL, Kafka, Redis, identity + other internal service calls, OTLP/tracing, Prometheus scrape,
-  Mailhog/SMTP, and notification's outbound webhook egress. Then `helm/heimcall` gets default-deny
-  ingress/egress with explicit allow rules only for those pairs/ports, plus gateway→service ingress.
-  Acceptance: with policies applied on kind, the full e2e flow still works (nothing starved by a missing
-  allow rule); a pod-to-pod call to a *non-allowed* pair is dropped; documented that enforcement depends on
-  the CNI.
+- **T4 (SPEC)** - **NetworkPolicy default-deny (helm) + T3 helm wiring.** Defense-in-depth, last. Treat as a
+  connection inventory, not a manifest-writing exercise: before default-deny, enumerate every required flow —
+  DNS, PostgreSQL, Kafka, Redis, identity + other internal service calls, **every caller → identity
+  `/oauth2/token`** (the T3 client_credentials mint is its own egress flow under default-deny), OTLP/tracing,
+  Prometheus scrape, Mailhog/SMTP, and notification's outbound webhook egress. Then `helm/heimcall` gets
+  default-deny ingress/egress with explicit allow rules only for those pairs/ports, plus gateway→service
+  ingress.
+  - **Carry the deferred T3 helm wiring here:** per-caller `HEIMCALL_CLIENT_SECRET_<self>` +
+    `HEIMCALL_TOKEN_URI` (identity `/oauth2/token`), callee `HEIMCALL_SERVICE_NAME`, and the
+    `schedule`/`notification` entries in `secrets.serviceClientSecrets` (consumed by identity). The single
+    full-fleet kind e2e validates both T3 (every hop tokened) and the network policies at once. Also lock the
+    gateway-never-routes-`/v1/internal` invariant with a test in this pass.
+  - Acceptance: with policies applied on kind, the full e2e flow still works (nothing starved by a missing
+    allow rule — including the token mint); a pod-to-pod call to a *non-allowed* pair is dropped; documented
+    that enforcement depends on the CNI.
 
 ## 10. Suggested Repository Structure
 

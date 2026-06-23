@@ -1,1 +1,2 @@
 com.urunsiyabend.heimcall.common.security.HeimcallSecurityAutoConfiguration
+com.urunsiyabend.heimcall.common.security.ServiceTokenClientAutoConfiguration

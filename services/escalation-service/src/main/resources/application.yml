@@ -32,6 +32,29 @@ spring:
       properties:
         # Propagate the correlation id onto outbound notification.requested events.
         interceptor.classes: com.urunsiyabend.heimcall.common.observability.CorrelationProducerInterceptor
+  # Phase 16 T3: client_credentials registrations. "identity" carries all three identity scopes (one aud);
+  # "schedule" carries the on-call scope. client-id is this service; dev secret overridden in prod.
+  security:
+    oauth2:
+      client:
+        provider:
+          heimcall:
+            token-uri: ${HEIMCALL_TOKEN_URI:http://localhost:8083/oauth2/token}
+        registration:
+          identity:
+            provider: heimcall
+            client-id: escalation
+            client-secret: ${HEIMCALL_CLIENT_SECRET_ESCALATION:dev-escalation-secret}
+            authorization-grant-type: client_credentials
+            client-authentication-method: client_secret_basic
+            scope: identity.membership.read,identity.team.read,identity.team-members.read
+          schedule:
+            provider: heimcall
+            client-id: escalation
+            client-secret: ${HEIMCALL_CLIENT_SECRET_ESCALATION:dev-escalation-secret}
+            authorization-grant-type: client_credentials
+            client-authentication-method: client_secret_basic
+            scope: schedule.on-call.read
 
 identity:
   base-url: ${IDENTITY_BASE_URL:http://localhost:8083}
@@ -47,6 +70,9 @@ escalation:
 heimcall:
   jwt:
     jwks-uri: ${HEIMCALL_JWT_JWKS_URI:http://localhost:8083/v1/.well-known/jwks.json}
+    # Phase 16 T3: this service's aud as a callee — catalog calls its escalation-policy lookup with a
+    # service token minted for aud=escalation (scope escalation.policy.read).
+    service-name: ${HEIMCALL_SERVICE_NAME:escalation}
 
 management:
   endpoints:

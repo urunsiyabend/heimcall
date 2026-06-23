@@ -27,6 +27,21 @@ spring:
         enable.idempotence: true
         # Propagate the correlation id from the producing request onto every outbound record.
         interceptor.classes: com.urunsiyabend.heimcall.common.observability.CorrelationProducerInterceptor
+  # Phase 16 T3: client_credentials registration for the identity key-resolve call during webhook ingest.
+  security:
+    oauth2:
+      client:
+        provider:
+          heimcall:
+            token-uri: ${HEIMCALL_TOKEN_URI:http://localhost:8083/oauth2/token}
+        registration:
+          identity:
+            provider: heimcall
+            client-id: integration
+            client-secret: ${HEIMCALL_CLIENT_SECRET_INTEGRATION:dev-integration-secret}
+            authorization-grant-type: client_credentials
+            client-authentication-method: client_secret_basic
+            scope: identity.integration-key.resolve
 
 identity:
   base-url: ${IDENTITY_BASE_URL:http://localhost:8083}

@@ -1,5 +1,6 @@
 package com.urunsiyabend.heimcall.schedule;
 
+import com.urunsiyabend.heimcall.common.security.ServiceTokenClients;
 import com.urunsiyabend.heimcall.schedule.web.ApiExceptions;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.HttpStatusCode;
@@ -18,11 +19,12 @@ public class IdentityClient {
 
     private final RestClient restClient;
 
-    public IdentityClient(RestClient.Builder builder,
+    public IdentityClient(RestClient.Builder builder, ServiceTokenClients serviceTokens,
                           @Value("${identity.base-url:http://localhost:8083}") String baseUrl) {
         // Boot's auto-configured builder carries the observation customizer, so this client emits a
         // client span + traceparent header and the callee joins the distributed trace (Phase 8 T4b).
-        this.restClient = builder.baseUrl(baseUrl).build();
+        // Phase 16 T3: attach an identity-scoped service token to every call (registration "identity").
+        this.restClient = serviceTokens.authorize(builder, "identity").baseUrl(baseUrl).build();
     }
 
     /** 403 if the caller is not a member of the org. */

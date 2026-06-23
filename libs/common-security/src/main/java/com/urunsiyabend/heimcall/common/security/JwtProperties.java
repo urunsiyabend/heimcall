@@ -54,6 +54,15 @@ public class JwtProperties {
     /** JWKS endpoint of the issuer; verifiers fetch public keys here. Unused on the signer (uses local keys). */
     private String jwksUri = "";
 
+    /**
+     * This service's own identity as a callee (Phase 16 T3). When set, the auth filter additionally accepts
+     * <b>service</b> tokens whose {@code aud} equals this value, mapping their {@code scope} claim to
+     * {@code SCOPE_*} authorities so {@code @PreAuthorize} on internal endpoints can pin the exact scope. Set
+     * only on services that expose {@code /v1/internal/**} or the key-resolve endpoint (identity, catalog,
+     * escalation, schedule); blank on caller-only services, which never receive a service token.
+     */
+    private String serviceName = "";
+
     public String getIssuer() {
         return issuer;
     }
@@ -132,6 +141,14 @@ public class JwtProperties {
 
     public void setJwksUri(String jwksUri) {
         this.jwksUri = jwksUri;
+    }
+
+    public String getServiceName() {
+        return serviceName;
+    }
+
+    public void setServiceName(String serviceName) {
+        this.serviceName = serviceName;
     }
 
     /** True when this service is configured as the signer (holds a private key). */

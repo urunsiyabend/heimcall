@@ -1,5 +1,6 @@
 package com.urunsiyabend.heimcall.incident;
 
+import com.urunsiyabend.heimcall.common.security.ServiceTokenClients;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
@@ -29,7 +30,7 @@ public class CatalogClient {
 
     private final RestClient restClient;
 
-    public CatalogClient(RestClient.Builder builder,
+    public CatalogClient(RestClient.Builder builder, ServiceTokenClients serviceTokens,
                          @Value("${catalog.base-url:http://localhost:8084}") String baseUrl,
                          @Value("${catalog.connect-timeout-ms:2000}") long connectTimeoutMs,
                          @Value("${catalog.read-timeout-ms:3000}") long readTimeoutMs) {
@@ -41,7 +42,8 @@ public class CatalogClient {
         ClientHttpRequestFactorySettings settings = ClientHttpRequestFactorySettings.DEFAULTS
                 .withConnectTimeout(Duration.ofMillis(connectTimeoutMs))
                 .withReadTimeout(Duration.ofMillis(readTimeoutMs));
-        this.restClient = builder
+        // Phase 16 T3: attach a catalog-scoped service token to every call (registration "catalog").
+        this.restClient = serviceTokens.authorize(builder, "catalog")
                 .requestFactory(ClientHttpRequestFactories.get(settings))
                 .baseUrl(baseUrl)
                 .build();

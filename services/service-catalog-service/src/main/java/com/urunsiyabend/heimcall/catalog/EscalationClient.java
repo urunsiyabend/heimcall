@@ -1,6 +1,7 @@
 package com.urunsiyabend.heimcall.catalog;
 
 import com.urunsiyabend.heimcall.catalog.web.ApiExceptions;
+import com.urunsiyabend.heimcall.common.security.ServiceTokenClients;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.HttpStatusCode;
 import org.springframework.stereotype.Component;
@@ -18,11 +19,12 @@ public class EscalationClient {
 
     private final RestClient restClient;
 
-    public EscalationClient(RestClient.Builder builder,
+    public EscalationClient(RestClient.Builder builder, ServiceTokenClients serviceTokens,
                             @Value("${escalation.base-url:http://localhost:8086}") String baseUrl) {
         // Boot's auto-configured builder carries the observation customizer, so this client emits a
         // client span + traceparent header and the callee joins the distributed trace (Phase 8 T4b).
-        this.restClient = builder.baseUrl(baseUrl).build();
+        // Phase 16 T3: attach an escalation-scoped service token to every call (registration "escalation").
+        this.restClient = serviceTokens.authorize(builder, "escalation").baseUrl(baseUrl).build();
     }
 
     /** Throws 409 if the policy does not exist in the org. */

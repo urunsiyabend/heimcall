@@ -9,6 +9,7 @@ import org.springframework.boot.context.properties.EnableConfigurationProperties
 import org.springframework.context.annotation.Bean;
 import org.springframework.core.io.ResourceLoader;
 import org.springframework.http.HttpMethod;
+import org.springframework.security.config.annotation.method.configuration.EnableMethodSecurity;
 import org.springframework.security.config.annotation.web.builders.HttpSecurity;
 import org.springframework.security.config.annotation.web.configurers.AbstractHttpConfigurer;
 import org.springframework.security.config.http.SessionCreationPolicy;
@@ -22,12 +23,15 @@ import org.springframework.security.web.authentication.UsernamePasswordAuthentic
  * {@link JwtIssuer}; verifiers get a {@link JwksKeyResolver}. Both verify through {@link JwtVerifier}.
  *
  * <p>Unauthenticated calls to protected routes get a plain 401 (no redirect, no session). Open routes:
- * actuator, the JWKS/discovery endpoints, the auth endpoints (login/register/refresh), service-to-service
- * internal APIs, the integration-key resolve call, and the webhook ingest endpoint (key-authenticated).
+ * actuator, the JWKS/discovery endpoints, the auth endpoints (login/register/refresh), and the webhook
+ * ingest endpoint (key-authenticated). Phase 16 T3: the service-to-service internal APIs
+ * ({@code /v1/internal/**}) and the integration-key resolve call now require a valid <b>service token</b>
+ * (no longer {@code permitAll}); method security ({@code @PreAuthorize}) pins the exact scope per endpoint.
  * A service can override the whole chain by declaring its own {@link SecurityFilterChain} bean.
  */
 @AutoConfiguration
 @EnableConfigurationProperties(JwtProperties.class)
+@EnableMethodSecurity
 public class HeimcallSecurityAutoConfiguration {
 
     /** Signer keys — only on the service that holds a private key (identity-service). */
@@ -64,8 +68,8 @@ public class HeimcallSecurityAutoConfiguration {
     }
 
     @Bean
-    public JwtAuthenticationFilter jwtAuthenticationFilter(JwtVerifier jwtVerifier) {
-        return new JwtAuthenticationFilter(jwtVerifier);
+    public JwtAuthenticationFilter jwtAuthenticationFilter(JwtVerifier jwtVerifier, JwtProperties props) {
+        return new JwtAuthenticationFilter(jwtVerifier, props.getServiceName());
     }
 
     @Bean
@@ -95,8 +99,12 @@ public class HeimcallSecurityAutoConfiguration {
                         .requestMatchers("/actuator/**").permitAll()
                         .requestMatchers(HttpMethod.GET, "/v1/.well-known/**").permitAll()
                         .requestMatchers(HttpMethod.POST, "/v1/auth/login", "/v1/auth/register", "/v1/auth/refresh").permitAll()
-                        .requestMatchers("/v1/internal/**").permitAll()
-                        .requestMatchers(HttpMethod.POST, "/v1/integration-keys/resolve").permitAll()
+                        // Phase 16 T3: internal service-to-service APIs and the integration-key resolve call
+                        // require a valid service token (authenticated here); the exact scope is pinned per
+                        // endpoint by @PreAuthorize. A user token authenticates but lacks any SCOPE_* authority,
+                        // so it is rejected at method security (403) — internal endpoints are machine-only.
+                        .requestMatchers("/v1/internal/**").authenticated()
+                        .requestMatchers(HttpMethod.POST, "/v1/integration-keys/resolve").authenticated()
                         .requestMatchers("/v1/integrations/**").permitAll()
                         .anyRequest().authenticated())
                 .exceptionHandling(e -> e.authenticationEntryPoint(

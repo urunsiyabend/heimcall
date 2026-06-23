@@ -73,9 +73,12 @@ public class AuthorizationServerConfig {
      */
     static final Map<String, List<String>> CLIENT_SCOPES = Map.of(
             "incident", List.of("identity.membership.read", "catalog.routing.resolve"),
-            "escalation", List.of("identity.membership.read", "identity.team-members.read", "schedule.on-call.read"),
+            "escalation", List.of("identity.membership.read", "identity.team.read", "identity.team-members.read",
+                    "schedule.on-call.read"),
             "integration", List.of("identity.integration-key.resolve"),
-            "catalog", List.of("escalation.policy.read"));
+            "catalog", List.of("identity.membership.read", "identity.team.read", "escalation.policy.read"),
+            "schedule", List.of("identity.membership.read"),
+            "notification", List.of("identity.membership.read"));
 
     /**
      * Authorization-server endpoints ({@code /oauth2/token}, {@code /oauth2/jwks}, metadata). Highest

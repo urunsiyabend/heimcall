@@ -1,5 +1,6 @@
 package com.urunsiyabend.heimcall.escalation;
 
+import com.urunsiyabend.heimcall.common.security.ServiceTokenClients;
 import com.urunsiyabend.heimcall.escalation.web.ApiExceptions;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -23,11 +24,12 @@ public class ScheduleClient {
 
     private final RestClient restClient;
 
-    public ScheduleClient(RestClient.Builder builder,
+    public ScheduleClient(RestClient.Builder builder, ServiceTokenClients serviceTokens,
                           @Value("${schedule.base-url:http://localhost:8085}") String baseUrl) {
         // Boot's auto-configured builder carries the observation customizer, so this client emits a
         // client span + traceparent header and the callee joins the distributed trace (Phase 8 T4b).
-        this.restClient = builder.baseUrl(baseUrl).build();
+        // Phase 16 T3: attach a schedule-scoped service token to every call (registration "schedule").
+        this.restClient = serviceTokens.authorize(builder, "schedule").baseUrl(baseUrl).build();
     }
 
     private record OnCall(UUID userId, String source, UUID rotationId) {

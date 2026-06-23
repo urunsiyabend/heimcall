@@ -11,8 +11,14 @@ dependencies {
 
     implementation 'org.springframework.boot:spring-boot-autoconfigure'
     compileOnly 'jakarta.servlet:jakarta.servlet-api'
+    // Phase 16 T3 client-side service-token acquisition. compileOnly so common-security still builds without
+    // it; caller services pull the real starter at runtime and the client beans switch on via @ConditionalOnClass.
+    compileOnly 'org.springframework.boot:spring-boot-starter-oauth2-client'
     annotationProcessor 'org.springframework.boot:spring-boot-configuration-processor'
 
     // Serialize the JWKS document in the produce->consume round-trip test (the way Spring MVC does at runtime).
     testImplementation 'com.fasterxml.jackson.core:jackson-databind'
+    testImplementation 'org.springframework.boot:spring-boot-starter-oauth2-client'
+    // Servlet API + Spring mock servlet types for the T3 filter test (servlet-api is compileOnly in main).
+    testImplementation 'jakarta.servlet:jakarta.servlet-api'
 }

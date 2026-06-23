@@ -4,6 +4,7 @@ import com.urunsiyabend.heimcall.schedule.OnCallResolver;
 import com.urunsiyabend.heimcall.schedule.domain.OnCallSchedule;
 import com.urunsiyabend.heimcall.schedule.domain.OnCallScheduleRepository;
 import org.springframework.http.ResponseEntity;
+import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.RequestMapping;
@@ -33,6 +34,7 @@ public class InternalController {
 
     /** Current on-call responder of the schedule. 404 if no such schedule in the org; 204 if no one is on call. */
     @GetMapping("/organizations/{orgId}/schedules/{id}/on-call")
+    @PreAuthorize("hasAuthority('SCOPE_schedule.on-call.read')")
     public ResponseEntity<OnCallResponse> onCall(@PathVariable UUID orgId, @PathVariable UUID id) {
         OnCallSchedule schedule = schedules.findByIdAndOrganizationId(id, orgId)
                 .orElseThrow(() -> new ApiExceptions.NotFoundException("schedule not found in organization"));

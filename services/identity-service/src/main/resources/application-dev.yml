@@ -8,3 +8,5 @@ heimcall:
     escalation: dev-escalation-secret
     integration: dev-integration-secret
     catalog: dev-catalog-secret
+    schedule: dev-schedule-secret
+    notification: dev-notification-secret

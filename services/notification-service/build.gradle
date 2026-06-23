@@ -6,6 +6,8 @@ dependencies {
     implementation 'org.springframework.boot:spring-boot-starter-validation'
     implementation 'org.springframework.boot:spring-boot-starter-actuator'
     implementation project(':libs:common-security')
+    // Phase 16 T3: acquire client_credentials service tokens for the identity membership check.
+    implementation 'org.springframework.boot:spring-boot-starter-oauth2-client'
     implementation project(':libs:common-observability')
     implementation project(':libs:common-outbox')
     implementation 'org.springframework.boot:spring-boot-starter-mail'

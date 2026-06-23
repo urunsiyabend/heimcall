@@ -1,5 +1,6 @@
 package com.urunsiyabend.heimcall.integration;
 
+import com.urunsiyabend.heimcall.common.security.ServiceTokenClients;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.HttpStatusCode;
 import org.springframework.stereotype.Component;
@@ -18,11 +19,12 @@ public class IdentityClient {
 
     private final RestClient restClient;
 
-    public IdentityClient(RestClient.Builder builder,
+    public IdentityClient(RestClient.Builder builder, ServiceTokenClients serviceTokens,
                           @Value("${identity.base-url:http://localhost:8083}") String baseUrl) {
         // Boot's auto-configured builder carries the observation customizer, so this client emits a
         // client span + traceparent header and identity-service joins the distributed trace (Phase 8 T4b).
-        this.restClient = builder.baseUrl(baseUrl).build();
+        // Phase 16 T3: attach an identity-scoped service token to every call (registration "identity").
+        this.restClient = serviceTokens.authorize(builder, "identity").baseUrl(baseUrl).build();
     }
 
     public record Resolution(UUID organizationId, UUID integrationId, String name) {

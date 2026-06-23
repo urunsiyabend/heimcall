@@ -3,6 +3,7 @@ package com.urunsiyabend.heimcall.escalation.web;
 import com.urunsiyabend.heimcall.escalation.domain.EscalationPolicy;
 import com.urunsiyabend.heimcall.escalation.domain.EscalationPolicyRepository;
 import org.springframework.http.HttpStatus;
+import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.RequestMapping;
@@ -28,6 +29,7 @@ public class InternalController {
     /** 204 if the policy exists in the org, 404 otherwise. */
     @GetMapping("/organizations/{orgId}/escalation-policies/{policyId}")
     @ResponseStatus(HttpStatus.NO_CONTENT)
+    @PreAuthorize("hasAuthority('SCOPE_escalation.policy.read')")
     public void checkPolicy(@PathVariable UUID orgId, @PathVariable UUID policyId) {
         policies.findByIdAndOrganizationId(policyId, orgId)
                 .map(EscalationPolicy::getId)

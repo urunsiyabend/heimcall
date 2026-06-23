@@ -14,6 +14,21 @@ spring:
     open-in-view: false
   flyway:
     enabled: true
+  # Phase 16 T3: client_credentials registration for identity (membership check on rotation participants).
+  security:
+    oauth2:
+      client:
+        provider:
+          heimcall:
+            token-uri: ${HEIMCALL_TOKEN_URI:http://localhost:8083/oauth2/token}
+        registration:
+          identity:
+            provider: heimcall
+            client-id: schedule
+            client-secret: ${HEIMCALL_CLIENT_SECRET_SCHEDULE:dev-schedule-secret}
+            authorization-grant-type: client_credentials
+            client-authentication-method: client_secret_basic
+            scope: identity.membership.read
 
 identity:
   base-url: ${IDENTITY_BASE_URL:http://localhost:8083}
@@ -22,6 +37,9 @@ identity:
 heimcall:
   jwt:
     jwks-uri: ${HEIMCALL_JWT_JWKS_URI:http://localhost:8083/v1/.well-known/jwks.json}
+    # Phase 16 T3: this service's aud as a callee — escalation calls its on-call lookup with a service token
+    # minted for aud=schedule (scope schedule.on-call.read).
+    service-name: ${HEIMCALL_SERVICE_NAME:schedule}
 
 management:
   endpoints:

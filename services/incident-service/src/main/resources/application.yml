@@ -33,6 +33,30 @@ spring:
       properties:
         # Propagate the correlation id onto outbound incident lifecycle events.
         interceptor.classes: com.urunsiyabend.heimcall.common.observability.CorrelationProducerInterceptor
+  # Phase 16 T3: client_credentials registrations for the callees this service talks to. One registration per
+  # callee (named after it), so each token's single audience opens only that service. client-id is this
+  # service; the dev secret is weak/visible and overridden in prod via HEIMCALL_CLIENT_SECRET_INCIDENT.
+  security:
+    oauth2:
+      client:
+        provider:
+          heimcall:
+            token-uri: ${HEIMCALL_TOKEN_URI:http://localhost:8083/oauth2/token}
+        registration:
+          identity:
+            provider: heimcall
+            client-id: incident
+            client-secret: ${HEIMCALL_CLIENT_SECRET_INCIDENT:dev-incident-secret}
+            authorization-grant-type: client_credentials
+            client-authentication-method: client_secret_basic
+            scope: identity.membership.read
+          catalog:
+            provider: heimcall
+            client-id: incident
+            client-secret: ${HEIMCALL_CLIENT_SECRET_INCIDENT:dev-incident-secret}
+            authorization-grant-type: client_credentials
+            client-authentication-method: client_secret_basic
+            scope: catalog.routing.resolve
 
 catalog:
   base-url: ${CATALOG_BASE_URL:http://localhost:8084}

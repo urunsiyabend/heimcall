@@ -34,6 +34,10 @@ heimcall:
     retired-key-id: ${HEIMCALL_JWT_RETIRED_KEY_ID:}
     access-ttl: ${HEIMCALL_JWT_ACCESS_TTL:PT1H}
     refresh-ttl: ${HEIMCALL_JWT_REFRESH_TTL:P30D}
+    # Phase 16 T3 — this service's own aud for inbound service tokens. identity is the callee for the
+    # membership/team/team-members internal lookups and the integration-key resolve call; its internal
+    # endpoints accept only service tokens minted with aud=identity (scope pinned per endpoint).
+    service-name: ${HEIMCALL_SERVICE_NAME:identity}
   # Phase 16 T2 — service (client_credentials) clients. identity-service mints short-lived RS256 service
   # tokens at POST /oauth2/token (client_secret_basic). The caller→scope matrix is authoritative IN CODE
   # (AuthorizationServerConfig.CLIENT_SCOPES); only secrets are config here. Secrets have NO fallback: a
@@ -45,6 +49,8 @@ heimcall:
     escalation: ${HEIMCALL_CLIENT_SECRET_ESCALATION:}
     integration: ${HEIMCALL_CLIENT_SECRET_INTEGRATION:}
     catalog: ${HEIMCALL_CLIENT_SECRET_CATALOG:}
+    schedule: ${HEIMCALL_CLIENT_SECRET_SCHEDULE:}
+    notification: ${HEIMCALL_CLIENT_SECRET_NOTIFICATION:}
 
 management:
   endpoints:
