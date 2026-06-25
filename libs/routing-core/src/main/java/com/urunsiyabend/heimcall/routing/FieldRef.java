@@ -1,4 +1,4 @@
-package com.urunsiyabend.heimcall.catalog.routing;
+package com.urunsiyabend.heimcall.routing;
 
 /**
  * A typed reference to a matchable field on the normalized alert (Phase 17). Deliberately NOT a

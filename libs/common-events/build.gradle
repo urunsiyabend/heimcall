@@ -3,4 +3,6 @@ apply plugin: 'java-library'
 
 dependencies {
     api project(':libs:common-domain')
+    // Phase 17 T2: the routing ruleset snapshot event carries the routing-core Ruleset across the wire.
+    api project(':libs:routing-core')
 }

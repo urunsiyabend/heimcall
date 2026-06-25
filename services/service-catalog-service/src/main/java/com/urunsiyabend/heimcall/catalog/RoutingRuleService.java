@@ -5,14 +5,14 @@ import com.urunsiyabend.heimcall.catalog.domain.RoutingRule;
 import com.urunsiyabend.heimcall.catalog.domain.RoutingRuleRepository;
 import com.urunsiyabend.heimcall.catalog.domain.RoutingRuleset;
 import com.urunsiyabend.heimcall.catalog.domain.RoutingRulesetRepository;
-import com.urunsiyabend.heimcall.catalog.routing.ConditionNode;
-import com.urunsiyabend.heimcall.catalog.routing.Rule;
-import com.urunsiyabend.heimcall.catalog.routing.RoutingAction;
-import com.urunsiyabend.heimcall.catalog.routing.RoutingContext;
-import com.urunsiyabend.heimcall.catalog.routing.RoutingDecision;
-import com.urunsiyabend.heimcall.catalog.routing.Ruleset;
-import com.urunsiyabend.heimcall.catalog.routing.TimeRestriction;
-import com.urunsiyabend.heimcall.catalog.routing.TreeRoutingEvaluator;
+import com.urunsiyabend.heimcall.routing.ConditionNode;
+import com.urunsiyabend.heimcall.routing.Rule;
+import com.urunsiyabend.heimcall.routing.RoutingAction;
+import com.urunsiyabend.heimcall.routing.RoutingContext;
+import com.urunsiyabend.heimcall.routing.RoutingDecision;
+import com.urunsiyabend.heimcall.routing.Ruleset;
+import com.urunsiyabend.heimcall.routing.TimeRestriction;
+import com.urunsiyabend.heimcall.routing.TreeRoutingEvaluator;
 import com.urunsiyabend.heimcall.catalog.web.ApiExceptions;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -40,17 +40,20 @@ public class RoutingRuleService {
     private final EscalationClient escalation;
     private final RoutingJsonCodec codec;
     private final RoutingRuleValidator validator;
+    private final RoutingSnapshotPublisher snapshots;
     private final TreeRoutingEvaluator evaluator = new TreeRoutingEvaluator();
 
     public RoutingRuleService(RoutingRuleRepository rules, RoutingRulesetRepository rulesets,
                               MonitoredServiceRepository services, EscalationClient escalation,
-                              RoutingJsonCodec codec, RoutingRuleValidator validator) {
+                              RoutingJsonCodec codec, RoutingRuleValidator validator,
+                              RoutingSnapshotPublisher snapshots) {
         this.rules = rules;
         this.rulesets = rulesets;
         this.services = services;
         this.escalation = escalation;
         this.codec = codec;
         this.validator = validator;
+        this.snapshots = snapshots;
     }
 
     /** A validated rule definition coming from the API (already parsed off the wire). */
@@ -165,6 +168,7 @@ public class RoutingRuleService {
             rs.setTimezone(timezone, Instant.now());
         }
         rs.setFallback(serviceId, policyId, Instant.now());
+        publishSnapshot(orgId);
         return rs;
     }
 
@@ -173,6 +177,7 @@ public class RoutingRuleService {
         RoutingRuleset rs = header(orgId);
         if (rs != null) {
             rs.setFallback(null, null, Instant.now());
+            publishSnapshot(orgId);
         }
     }
 
@@ -235,6 +240,14 @@ public class RoutingRuleService {
 
     private void bumpVersion(UUID orgId) {
         ensureRuleset(orgId).bump(Instant.now());
+        publishSnapshot(orgId);
+    }
+
+    /** Append the new full ruleset snapshot to the outbox in this same transaction (Phase 17 T2) so the
+     *  publish never ghosts on rollback and never drops on commit. Reads the just-mutated state (JPA
+     *  flushes before the assemble queries), so the snapshot carries the bumped version. */
+    private void publishSnapshot(UUID orgId) {
+        snapshots.publish(orgId, assemble(orgId));
     }
 
     private static boolean isAlwaysTrue(ConditionNode node) {

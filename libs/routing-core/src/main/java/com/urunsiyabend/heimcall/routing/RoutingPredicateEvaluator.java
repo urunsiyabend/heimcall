@@ -1,4 +1,4 @@
-package com.urunsiyabend.heimcall.catalog.routing;
+package com.urunsiyabend.heimcall.routing;
 
 /**
  * Evaluates an alert against a ruleset and returns the single routing decision (Phase 17). A pure,

@@ -1,4 +1,4 @@
-package com.urunsiyabend.heimcall.catalog.routing;
+package com.urunsiyabend.heimcall.routing;
 
 import java.util.List;
 import java.util.UUID;

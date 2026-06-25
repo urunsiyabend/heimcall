@@ -1,10 +1,10 @@
 package com.urunsiyabend.heimcall.catalog;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.urunsiyabend.heimcall.catalog.routing.ConditionNode;
-import com.urunsiyabend.heimcall.catalog.routing.FieldRef;
-import com.urunsiyabend.heimcall.catalog.routing.Operator;
-import com.urunsiyabend.heimcall.catalog.routing.TimeRestriction;
+import com.urunsiyabend.heimcall.routing.ConditionNode;
+import com.urunsiyabend.heimcall.routing.FieldRef;
+import com.urunsiyabend.heimcall.routing.Operator;
+import com.urunsiyabend.heimcall.routing.TimeRestriction;
 import com.urunsiyabend.heimcall.catalog.web.ApiExceptions;
 import org.junit.jupiter.api.Test;
 

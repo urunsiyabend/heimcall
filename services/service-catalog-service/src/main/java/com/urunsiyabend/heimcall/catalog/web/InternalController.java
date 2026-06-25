@@ -1,8 +1,8 @@
 package com.urunsiyabend.heimcall.catalog.web;
 
 import com.urunsiyabend.heimcall.catalog.RoutingRuleService;
-import com.urunsiyabend.heimcall.catalog.routing.RoutingContext;
-import com.urunsiyabend.heimcall.catalog.routing.RoutingDecision;
+import com.urunsiyabend.heimcall.routing.RoutingContext;
+import com.urunsiyabend.heimcall.routing.RoutingDecision;
 import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;

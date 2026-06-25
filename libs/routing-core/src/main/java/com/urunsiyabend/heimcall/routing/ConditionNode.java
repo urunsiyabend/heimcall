@@ -1,4 +1,7 @@
-package com.urunsiyabend.heimcall.catalog.routing;
+package com.urunsiyabend.heimcall.routing;
+
+import com.fasterxml.jackson.annotation.JsonSubTypes;
+import com.fasterxml.jackson.annotation.JsonTypeInfo;
 
 import java.util.List;
 
@@ -9,7 +12,16 @@ import java.util.List;
  * UI-buildable, validatable at save). The evaluator interprets the tree directly (see
  * {@link RoutingPredicateEvaluator}) so an explanation like "rule 3 didn't match because metadata.env
  * was present but != prod" is cheap.
+ *
+ * <p>Polymorphic over a {@code "node"} discriminator (T2): the same shape the catalog codec emits to
+ * the {@code condition_json} column and the migration SQL writes, so the stored form and the ruleset
+ * snapshot that crosses the wire to incident-service are one definition.
  */
+@JsonTypeInfo(use = JsonTypeInfo.Id.NAME, include = JsonTypeInfo.As.PROPERTY, property = "node")
+@JsonSubTypes({
+        @JsonSubTypes.Type(value = ConditionNode.Group.class, name = "GROUP"),
+        @JsonSubTypes.Type(value = ConditionNode.Leaf.class, name = "LEAF")
+})
 public sealed interface ConditionNode permits ConditionNode.Group, ConditionNode.Leaf {
 
     enum BoolOp { ALL, ANY, NOT }

@@ -2,9 +2,9 @@ package com.urunsiyabend.heimcall.catalog;
 
 import com.google.re2j.Pattern;
 import com.google.re2j.PatternSyntaxException;
-import com.urunsiyabend.heimcall.catalog.routing.ConditionNode;
-import com.urunsiyabend.heimcall.catalog.routing.FieldRef;
-import com.urunsiyabend.heimcall.catalog.routing.Operator;
+import com.urunsiyabend.heimcall.routing.ConditionNode;
+import com.urunsiyabend.heimcall.routing.FieldRef;
+import com.urunsiyabend.heimcall.routing.Operator;
 import com.urunsiyabend.heimcall.catalog.web.ApiExceptions;
 import com.urunsiyabend.heimcall.common.domain.MessageType;
 import com.urunsiyabend.heimcall.common.domain.Severity;

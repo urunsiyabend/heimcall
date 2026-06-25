@@ -1,0 +1,17 @@
+// Pure routing decision engine (Phase 17 T2): condition model + evaluator, shared by service-catalog
+// (authoring/preview) and incident-service (local hot-path evaluation of the replicated ruleset) so
+// both produce a byte-identical decision. NO Spring / JPA / storage / CRUD — those stay in catalog.
+// java-library so the model + RE2J leak transitively to both consumers via `api`.
+apply plugin: 'java-library'
+
+dependencies {
+    // Linear-time regex (no catastrophic backtracking / ReDoS) for user-authored rule patterns.
+    api 'com.google.re2j:re2j:1.7'
+    // Polymorphic (de)serialization of the condition tree so the ruleset crosses the wire as a
+    // snapshot; annotations only — each service supplies its own ObjectMapper (version from Boot BOM).
+    api 'com.fasterxml.jackson.core:jackson-annotations'
+
+    // Round-trip the snapshot in tests with a real mapper (the services bring their own at runtime).
+    testImplementation 'com.fasterxml.jackson.core:jackson-databind'
+    testImplementation 'com.fasterxml.jackson.datatype:jackson-datatype-jsr310'
+}

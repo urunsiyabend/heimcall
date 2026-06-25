@@ -10,6 +10,7 @@ include 'libs:common-events'
 include 'libs:common-security'
 include 'libs:common-observability'
 include 'libs:common-outbox'
+include 'libs:routing-core'
 include 'libs:test-support'
 
 include 'services:api-gateway'

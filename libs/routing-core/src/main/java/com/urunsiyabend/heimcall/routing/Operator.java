@@ -1,4 +1,4 @@
-package com.urunsiyabend.heimcall.catalog.routing;
+package com.urunsiyabend.heimcall.routing;
 
 /**
  * Condition leaf operators (Phase 17). String-typed unless noted. The {@code GT/GTE/LT/LTE} family

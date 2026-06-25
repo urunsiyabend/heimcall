@@ -14,6 +14,9 @@ spring:
     open-in-view: false
   flyway:
     enabled: true
+  # Phase 17 T2: publish routing ruleset snapshots through the transactional outbox relay.
+  kafka:
+    bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
   # Phase 16 T3: client_credentials registrations. "identity" carries membership + team scopes (one aud);
   # "escalation" carries the policy scope. client-id is this service; dev secret overridden in prod.
   security:
