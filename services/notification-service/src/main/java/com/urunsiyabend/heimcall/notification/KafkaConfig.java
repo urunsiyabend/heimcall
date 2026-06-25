@@ -14,6 +14,7 @@ import org.springframework.kafka.support.serializer.DelegatingByTypeSerializer;
 import org.springframework.kafka.support.serializer.JsonSerializer;
 import org.springframework.util.backoff.FixedBackOff;
 
+import java.util.LinkedHashMap;
 import java.util.Map;
 
 /**
@@ -31,12 +32,20 @@ public class KafkaConfig {
 
     @Bean
     public ProducerFactory<String, Object> dltProducerFactory(KafkaProperties properties) {
+        // Ordered (byte[] checked before Object) + assignable matching: a deserialized event object
+        // matches Object -> JSON; a raw poison-pill byte[] matches byte[] -> raw. Map.of order is
+        // undefined, so a LinkedHashMap is required to keep byte[] ahead of the Object catch-all.
+        // Exact-match (the prior default) only handled the poison-pill case and threw
+        // SerializationException ("No matching delegate for type: NotificationRequestedEvent") on any
+        // deserialized-object value, which silently broke dead-lettering for every application
+        // exception (e.g. a null-org request) -> permanent single-partition stall, delivered=0.
+        Map<Class<?>, org.apache.kafka.common.serialization.Serializer<?>> delegates = new LinkedHashMap<>();
+        delegates.put(byte[].class, new ByteArraySerializer());
+        delegates.put(Object.class, new JsonSerializer<>());
         return new DefaultKafkaProducerFactory<>(
                 properties.buildProducerProperties(null),
                 new StringSerializer(),
-                new DelegatingByTypeSerializer(Map.of(
-                        byte[].class, new ByteArraySerializer(),
-                        Object.class, new JsonSerializer<>())));
+                new DelegatingByTypeSerializer(delegates, true));
     }
 
     @Bean
