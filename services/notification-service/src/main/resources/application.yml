@@ -27,6 +27,11 @@ spring:
       mail.smtp.starttls.enable: false
   kafka:
     bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
+    listener:
+      # Phase 18 T3: one consumer thread per partition of notification.requested.v1 (keyed by
+      # incidentId, so per-incident order is preserved within a partition). Effective parallelism is
+      # min(concurrency, partitions); keep this aligned with the topic partition count below.
+      concurrency: ${NOTIFICATION_CONSUMER_CONCURRENCY:4}
     consumer:
       group-id: notification-service.notification-requested-consumer
       auto-offset-reset: earliest

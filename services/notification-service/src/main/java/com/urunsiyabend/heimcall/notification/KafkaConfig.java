@@ -1,10 +1,14 @@
 package com.urunsiyabend.heimcall.notification;
 
+import com.urunsiyabend.heimcall.common.events.Topics;
+import org.apache.kafka.clients.admin.NewTopic;
 import org.apache.kafka.common.serialization.ByteArraySerializer;
 import org.apache.kafka.common.serialization.StringSerializer;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.autoconfigure.kafka.KafkaProperties;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.kafka.config.TopicBuilder;
 import org.springframework.kafka.core.DefaultKafkaProducerFactory;
 import org.springframework.kafka.core.KafkaTemplate;
 import org.springframework.kafka.core.ProducerFactory;
@@ -29,6 +33,25 @@ public class KafkaConfig {
 
     private static final long RETRY_INTERVAL_MS = 1000L;
     private static final long MAX_RETRIES = 2L;
+
+    /**
+     * Phase 18 T3: provision {@code notification.requested.v1} with N partitions up front so consumer
+     * parallelism (the {@code spring.kafka.listener.concurrency} setting) has partitions to spread
+     * across — a single-partition topic caps the consumer group at one active thread regardless of
+     * concurrency. Keyed by incidentId (set by the escalation producer), so per-incident page ordering
+     * is preserved within a partition while distinct incidents fan out across the group. Partitions are
+     * provisioned at creation, never ALTERed live: adding partitions to a keyed topic rehashes keys and
+     * breaks ordering, so a fresh environment gets N from the start.
+     */
+    @Bean
+    public NewTopic notificationRequestedTopic(
+            @Value("${heimcall.notification.requested-topic.partitions:4}") int partitions,
+            @Value("${heimcall.notification.requested-topic.replicas:1}") int replicas) {
+        return TopicBuilder.name(Topics.NOTIFICATION_REQUESTED)
+                .partitions(partitions)
+                .replicas(replicas)
+                .build();
+    }
 
     @Bean
     public ProducerFactory<String, Object> dltProducerFactory(KafkaProperties properties) {
