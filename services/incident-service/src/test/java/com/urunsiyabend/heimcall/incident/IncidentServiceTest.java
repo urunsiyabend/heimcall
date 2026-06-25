@@ -5,7 +5,6 @@ import com.urunsiyabend.heimcall.common.domain.IncidentStatus;
 import com.urunsiyabend.heimcall.common.domain.MessageType;
 import com.urunsiyabend.heimcall.common.domain.Severity;
 import com.urunsiyabend.heimcall.common.events.AlertReceivedEvent;
-import com.urunsiyabend.heimcall.incident.CatalogClient.Routing;
 import com.urunsiyabend.heimcall.incident.domain.Alert;
 import com.urunsiyabend.heimcall.incident.domain.AlertOccurrenceRepository;
 import com.urunsiyabend.heimcall.incident.domain.AlertRepository;
@@ -87,9 +86,10 @@ class IncidentServiceTest {
     void critical_firstSignal_opensIncidentRoutedAndPublishesTriggered() {
         UUID policy = UUID.randomUUID();
         UUID svc = UUID.randomUUID();
+        UUID ruleId = UUID.randomUUID();
         when(alerts.findFirstByOrganizationIdAndDedupKeyAndStatus(ORG, DEDUP, AlertStatus.OPEN))
                 .thenReturn(Optional.empty());
-        when(routing.resolve(ORG, KEY)).thenReturn(RoutingDecision.routed(new Routing(svc, policy, UUID.randomUUID())));
+        when(routing.resolve(any())).thenReturn(new RoutingDecision(svc, policy, ruleId, 7L, false, false));
 
         service.handle(event(MessageType.CRITICAL));
 
@@ -99,14 +99,18 @@ class IncidentServiceTest {
         assertThat(incident.getStatus()).isEqualTo(IncidentStatus.TRIGGERED);
         assertThat(incident.getEscalationPolicyId()).isEqualTo(policy);
         assertThat(incident.getServiceId()).isEqualTo(svc);
+        assertThat(incident.getMatchedRuleId()).isEqualTo(ruleId);
+        assertThat(incident.getRulesetVersion()).isEqualTo(7L);
         assertThat(incident.isUnrouted()).isFalse();
         assertThat(incident.isRoutedFromCache()).isFalse();
-        assertThat(savedTimelineTypes()).containsExactly("TRIGGER");
+        // Phase 17: a routed page records a ROUTED explainability line alongside TRIGGER.
+        assertThat(savedTimelineTypes()).containsExactly("TRIGGER", "ROUTED");
 
         ArgumentCaptor<IncidentDomainEvents.Triggered> ev =
                 ArgumentCaptor.forClass(IncidentDomainEvents.Triggered.class);
         verify(events).publishEvent(ev.capture());
         assertThat(ev.getValue().escalationPolicyId()).isEqualTo(policy);
+        assertThat(ev.getValue().matchedRuleId()).isEqualTo(ruleId);
         assertThat(ev.getValue().unrouted()).isFalse();
         verify(processedEvents).save(any());
     }
@@ -129,7 +133,7 @@ class IncidentServiceTest {
         assertThat(savedTimelineTypes()).containsExactly("DUPLICATE");
         // No new incident is opened and no fresh TRIGGER is published.
         verify(events, never()).publishEvent(any(IncidentDomainEvents.Triggered.class));
-        verify(routing, never()).resolve(any(), any());
+        verify(routing, never()).resolve(any());
     }
 
     // ---- RECOVERY closes the alert and resolves its incident ----
@@ -182,7 +186,7 @@ class IncidentServiceTest {
 
         verify(alerts).save(any(Alert.class));
         verify(incidents, never()).save(any());
-        verify(routing, never()).resolve(any(), any());
+        verify(routing, never()).resolve(any());
         verifyNoInteractions(timeline);
     }
 
@@ -207,7 +211,7 @@ class IncidentServiceTest {
     void critical_noMatch_marksUnroutedAndPublishesUnroutedTriggered() {
         when(alerts.findFirstByOrganizationIdAndDedupKeyAndStatus(ORG, DEDUP, AlertStatus.OPEN))
                 .thenReturn(Optional.empty());
-        when(routing.resolve(ORG, KEY)).thenReturn(RoutingDecision.noMatch());
+        when(routing.resolve(any())).thenReturn(new RoutingDecision(null, null, null, 3L, true, false));
 
         service.handle(event(MessageType.CRITICAL));
 
@@ -224,22 +228,24 @@ class IncidentServiceTest {
         assertThat(ev.getValue().escalationPolicyId()).isNull();
     }
 
-    // ---- degraded page from last-known-good cache (Phase 10 T4) ----
+    // ---- routed via the ruleset fallback (no rule matched, but a default policy is set) ----
 
     @Test
-    void critical_outageFromCache_marksRoutedFromCache() {
+    void critical_routedViaFallback_recordsRoutedWithNullMatchedRule() {
         UUID policy = UUID.randomUUID();
         when(alerts.findFirstByOrganizationIdAndDedupKeyAndStatus(ORG, DEDUP, AlertStatus.OPEN))
                 .thenReturn(Optional.empty());
-        when(routing.resolve(ORG, KEY))
-                .thenReturn(RoutingDecision.fromCache(new Routing(UUID.randomUUID(), policy, UUID.randomUUID())));
+        // matchedRuleId null = the ruleset fallback supplied the policy (not a specific rule).
+        when(routing.resolve(any())).thenReturn(new RoutingDecision(null, policy, null, 9L, false, false));
 
         service.handle(event(MessageType.CRITICAL));
 
         ArgumentCaptor<Incident> saved = ArgumentCaptor.forClass(Incident.class);
         verify(incidents).save(saved.capture());
-        assertThat(saved.getValue().isRoutedFromCache()).isTrue();
+        assertThat(saved.getValue().isUnrouted()).isFalse();
         assertThat(saved.getValue().getEscalationPolicyId()).isEqualTo(policy);
-        assertThat(savedTimelineTypes()).containsExactly("TRIGGER", "ROUTED_FROM_CACHE");
+        assertThat(saved.getValue().getMatchedRuleId()).isNull();
+        assertThat(saved.getValue().getRulesetVersion()).isEqualTo(9L);
+        assertThat(savedTimelineTypes()).containsExactly("TRIGGER", "ROUTED");
     }
 }

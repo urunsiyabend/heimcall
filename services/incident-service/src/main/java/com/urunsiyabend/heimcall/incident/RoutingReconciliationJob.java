@@ -82,7 +82,7 @@ public class RoutingReconciliationJob {
             Key key = group.getKey();
             Optional<Routing> live;
             try {
-                live = catalog.resolve(key.organizationId(), key.routingKey());
+                live = catalog.resolveByKey(key.organizationId(), key.routingKey());
             } catch (RoutingUnavailableException stillDown) {
                 // Catalog has not recovered. Leave the rest unreconciled and retry next cycle (backoff).
                 log.warn("Catalog still unavailable during reconciliation; aborting cycle: {}", stillDown.getMessage());

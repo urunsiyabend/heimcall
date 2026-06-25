@@ -6,6 +6,13 @@ public final class ApiExceptions {
     private ApiExceptions() {
     }
 
+    /** 400 - malformed or semantically invalid request (e.g. bad condition tree, regex, timezone). */
+    public static class BadRequestException extends RuntimeException {
+        public BadRequestException(String message) {
+            super(message);
+        }
+    }
+
     /** 404 - referenced aggregate does not exist. */
     public static class NotFoundException extends RuntimeException {
         public NotFoundException(String message) {

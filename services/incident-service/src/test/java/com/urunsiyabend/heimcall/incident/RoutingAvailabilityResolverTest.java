@@ -1,7 +1,9 @@
 package com.urunsiyabend.heimcall.incident;
 
-import com.urunsiyabend.heimcall.incident.CatalogClient.Routing;
-import com.urunsiyabend.heimcall.incident.domain.RoutingCacheStore;
+import com.urunsiyabend.heimcall.common.domain.MessageType;
+import com.urunsiyabend.heimcall.common.domain.Severity;
+import com.urunsiyabend.heimcall.common.events.AlertReceivedEvent;
+import com.urunsiyabend.heimcall.incident.CatalogClient.RoutingResult;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.InjectMocks;
@@ -9,88 +11,72 @@ import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
 import java.time.Instant;
-import java.util.Optional;
+import java.util.Map;
 import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
-import static org.mockito.Mockito.never;
-import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 /**
- * Phase 13 T1: the {@link RoutingAvailabilityResolver} decision table (Phase 10 T4) — the highest-risk
- * routing logic, where a wrong branch silently de-pages a real incident or pages from a dead route.
- * Pure Mockito: {@link CatalogClient} and {@link RoutingCacheStore} are stubbed, no infra.
+ * Phase 17 T1: the {@link RoutingAvailabilityResolver} is now a thin, cache-free wrapper over
+ * {@link CatalogClient}. A successful resolve is either ROUTED or a deliberate UNROUTED; a catalog
+ * OUTAGE propagates as {@link RoutingUnavailableException} (retry/DLT, no misroute) — the documented
+ * T1 availability regression vs Phase 10 T4, restored correctly by the T2 local projection.
  */
 @ExtendWith(MockitoExtension.class)
 class RoutingAvailabilityResolverTest {
 
     private static final UUID ORG = UUID.randomUUID();
-    private static final String KEY = "backend-critical";
 
     @Mock
     CatalogClient catalog;
-    @Mock
-    RoutingCacheStore cache;
     @InjectMocks
     RoutingAvailabilityResolver resolver;
 
-    @Test
-    void catalog200_writesThroughCache_andRoutes() {
-        Routing live = new Routing(UUID.randomUUID(), UUID.randomUUID(), UUID.randomUUID());
-        when(catalog.resolve(ORG, KEY)).thenReturn(Optional.of(live));
-
-        RoutingDecision decision = resolver.resolve(ORG, KEY);
-
-        assertThat(decision.unrouted()).isFalse();
-        assertThat(decision.fromCache()).isFalse();
-        assertThat(decision.policyId()).isEqualTo(live.escalationPolicyId());
-        assertThat(decision.serviceId()).isEqualTo(live.serviceId());
-        // Write-through so this stays last-known-good for a future outage.
-        verify(cache).put(eq(ORG), eq(KEY), eq(live), any(Instant.class));
-        verify(cache, never()).evict(any(), any());
+    private AlertReceivedEvent event() {
+        return new AlertReceivedEvent(UUID.randomUUID(), Instant.now(), ORG, UUID.randomUUID(),
+                "backend-critical", "grafana", MessageType.CRITICAL, "ext-1", "dedup",
+                "Payment API 5xx", "error rate high", Severity.CRITICAL, Map.of());
     }
 
     @Test
-    void catalog404_tombstonesCache_andIsUnrouted() {
-        when(catalog.resolve(ORG, KEY)).thenReturn(Optional.empty());
+    void routedDecisionPassesThrough() {
+        UUID svc = UUID.randomUUID();
+        UUID policy = UUID.randomUUID();
+        UUID rule = UUID.randomUUID();
+        when(catalog.resolve(eq(ORG), any(AlertReceivedEvent.class)))
+                .thenReturn(new RoutingResult(svc, policy, rule, 4L, false));
 
-        RoutingDecision decision = resolver.resolve(ORG, KEY);
+        RoutingDecision decision = resolver.resolve(event());
+
+        assertThat(decision.unrouted()).isFalse();
+        assertThat(decision.fromCache()).isFalse();
+        assertThat(decision.serviceId()).isEqualTo(svc);
+        assertThat(decision.policyId()).isEqualTo(policy);
+        assertThat(decision.matchedRuleId()).isEqualTo(rule);
+        assertThat(decision.rulesetVersion()).isEqualTo(4L);
+    }
+
+    @Test
+    void unroutedDecisionPassesThrough() {
+        when(catalog.resolve(eq(ORG), any(AlertReceivedEvent.class)))
+                .thenReturn(new RoutingResult(null, null, null, 4L, true));
+
+        RoutingDecision decision = resolver.resolve(event());
 
         assertThat(decision.unrouted()).isTrue();
-        assertThat(decision.fromCache()).isFalse();
         assertThat(decision.policyId()).isNull();
-        // A dead route must never survive to page from cache on a later outage.
-        verify(cache).evict(ORG, KEY);
-        verify(cache, never()).put(any(), any(), any(), any());
     }
 
     @Test
-    void outageWithCacheHit_pagesFromCache() {
-        Routing cached = new Routing(UUID.randomUUID(), UUID.randomUUID(), UUID.randomUUID());
-        when(catalog.resolve(ORG, KEY)).thenThrow(new RoutingUnavailableException(KEY, new RuntimeException("down")));
-        when(cache.find(ORG, KEY)).thenReturn(Optional.of(cached));
+    void outageRethrowsForRetryDlt() {
+        when(catalog.resolve(eq(ORG), any(AlertReceivedEvent.class)))
+                .thenThrow(new RoutingUnavailableException("backend-critical", new RuntimeException("down")));
 
-        RoutingDecision decision = resolver.resolve(ORG, KEY);
-
-        assertThat(decision.fromCache()).isTrue();
-        assertThat(decision.unrouted()).isFalse();
-        assertThat(decision.policyId()).isEqualTo(cached.escalationPolicyId());
-        // Outage path must not mutate the cache.
-        verify(cache, never()).put(any(), any(), any(), any());
-        verify(cache, never()).evict(any(), any());
-    }
-
-    @Test
-    void outageWithCacheMiss_rethrowsForRetryDlt() {
-        RoutingUnavailableException outage = new RoutingUnavailableException(KEY, new RuntimeException("down"));
-        when(catalog.resolve(ORG, KEY)).thenThrow(outage);
-        when(cache.find(ORG, KEY)).thenReturn(Optional.empty());
-
-        assertThatThrownBy(() -> resolver.resolve(ORG, KEY))
+        assertThatThrownBy(() -> resolver.resolve(event()))
                 .isInstanceOf(RoutingUnavailableException.class);
     }
 }

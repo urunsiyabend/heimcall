@@ -21,6 +21,7 @@ import java.time.Duration;
 @Component
 public class IncidentMetrics {
 
+    private final MeterRegistry registry;
     private final IncidentRepository incidents;
     private final Counter triggered;
     private final Counter unrouted;
@@ -31,6 +32,7 @@ public class IncidentMetrics {
     private final Timer timeToResolve;
 
     public IncidentMetrics(MeterRegistry registry, IncidentRepository incidents) {
+        this.registry = registry;
         this.incidents = incidents;
         this.triggered = registry.counter("incident.triggered");
         this.unrouted = registry.counter("incident.unrouted");
@@ -53,6 +55,11 @@ public class IncidentMetrics {
         // counted decision (incident_routed_from_cache_total), not a silent fallthrough.
         if (e.routedFromCache()) {
             routedFromCache.increment();
+        }
+        // Phase 17: which routing rule actually paged this incident. Tagged by rule id (bounded
+        // cardinality — one per authored rule); a fallback/UNROUTED page has no matched rule.
+        if (e.matchedRuleId() != null) {
+            registry.counter("routing.rule_matched", "ruleId", e.matchedRuleId().toString()).increment();
         }
     }
 

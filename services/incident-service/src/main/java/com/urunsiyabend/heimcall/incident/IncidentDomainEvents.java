@@ -16,8 +16,8 @@ final class IncidentDomainEvents {
     }
 
     record Triggered(UUID incidentId, UUID organizationId, String dedupKey, String title,
-                     Severity severity, UUID escalationPolicyId, boolean unrouted, boolean routedFromCache,
-                     Instant at) {
+                     Severity severity, UUID escalationPolicyId, UUID matchedRuleId, boolean unrouted,
+                     boolean routedFromCache, Instant at) {
     }
 
     record Acknowledged(UUID incidentId, UUID organizationId, Instant at) {

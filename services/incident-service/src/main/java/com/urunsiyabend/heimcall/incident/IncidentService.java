@@ -117,14 +117,15 @@ public class IncidentService {
                 event.externalEntityId(), event.title(), event.description(),
                 event.severity(), event.routingKey(), at);
 
-        // Resolve routing -> owning service + escalation policy with a last-known-good availability
-        // fallback (Phase 10 T4). After T2 catalog resolution is TOTAL, so a live answer is either a
-        // policy (ROUTED) or a definitive 404 no-match (UNROUTED). A catalog OUTAGE is neither: the
-        // resolver pages from the cached route (fromCache) if one exists, else re-throws
-        // RoutingUnavailableException so the event is retried + dead-lettered (no orphan, no silent drop).
-        RoutingDecision decision = routing.resolve(event.organizationId(), event.routingKey());
+        // Resolve routing -> owning service + escalation policy via service-catalog's rule engine
+        // (Phase 17). Resolution is TOTAL: a live answer is either a policy (ROUTED) or a deliberate
+        // UNROUTED. A catalog OUTAGE is neither: the resolver re-throws RoutingUnavailableException so
+        // the event is retried + dead-lettered (no orphan, no silent drop, no misroute). T1 has no
+        // last-known-good cache for rule decisions (unsafe once routing is more than a key); T2 restores
+        // outage tolerance via a local ruleset projection.
+        RoutingDecision decision = routing.resolve(event);
         UUID policyId = decision.policyId();
-        incident.stampRouting(decision.serviceId(), policyId);
+        incident.stampRouting(decision.serviceId(), policyId, decision.matchedRuleId(), decision.rulesetVersion());
         if (decision.unrouted()) {
             incident.markUnrouted();
         }
@@ -142,6 +143,15 @@ public class IncidentService {
             timeline.save(TimelineEvent.of(incident.getId(), "UNROUTED",
                     "No routing match and no org-default escalation policy (routingKey=" + event.routingKey()
                             + "); incident created but NOT paged", at));
+        } else if (policyId != null) {
+            // Explainability (Phase 17): which rule (or the fallback) selected the page, and the ruleset
+            // version evaluated. The short line lives on the timeline; the full per-predicate trace is
+            // preview-only and never bloats production history.
+            String via = decision.matchedRuleId() != null
+                    ? "rule " + decision.matchedRuleId()
+                    : "ruleset fallback";
+            timeline.save(TimelineEvent.of(incident.getId(), "ROUTED",
+                    "Routed via " + via + " (ruleset v" + decision.rulesetVersion() + ")", at));
         }
         if (decision.fromCache()) {
             // Degraded routing: catalog was unavailable, so this paged on the last-known-good policy.
@@ -155,7 +165,7 @@ public class IncidentService {
 
         events.publishEvent(new IncidentDomainEvents.Triggered(incident.getId(), incident.getOrganizationId(),
                 incident.getDedupKey(), incident.getTitle(), incident.getSeverity(), policyId,
-                decision.unrouted(), decision.fromCache(), at));
+                decision.matchedRuleId(), decision.unrouted(), decision.fromCache(), at));
     }
 
     private void recover(AlertReceivedEvent event, Alert alert, Instant at) {

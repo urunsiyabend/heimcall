@@ -54,6 +54,12 @@ public class Incident {
     @Column(name = "escalation_policy_id")
     private UUID escalationPolicyId;
 
+    @Column(name = "matched_rule_id")
+    private UUID matchedRuleId;
+
+    @Column(name = "ruleset_version")
+    private Long rulesetVersion;
+
     @Column(name = "unrouted", nullable = false)
     private boolean unrouted;
 
@@ -99,10 +105,14 @@ public class Incident {
         return incident;
     }
 
-    /** Stamp the resolved routing/ownership from service-catalog (may be left null if unresolved). */
-    public void stampRouting(UUID serviceId, UUID escalationPolicyId) {
+    /** Stamp the routing decision from service-catalog's rule engine (Phase 17): the resolved service +
+     *  policy, the rule that matched ({@code null} when the ruleset fallback supplied the policy), and
+     *  the ruleset version evaluated — recorded for explainability. Any may be null if unresolved. */
+    public void stampRouting(UUID serviceId, UUID escalationPolicyId, UUID matchedRuleId, Long rulesetVersion) {
         this.serviceId = serviceId;
         this.escalationPolicyId = escalationPolicyId;
+        this.matchedRuleId = matchedRuleId;
+        this.rulesetVersion = rulesetVersion;
     }
 
     /**
@@ -203,6 +213,14 @@ public class Incident {
 
     public UUID getEscalationPolicyId() {
         return escalationPolicyId;
+    }
+
+    public UUID getMatchedRuleId() {
+        return matchedRuleId;
+    }
+
+    public Long getRulesetVersion() {
+        return rulesetVersion;
     }
 
     public boolean isUnrouted() {

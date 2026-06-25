@@ -5,6 +5,11 @@ dependencies {
     implementation 'org.springframework.boot:spring-boot-starter-data-jpa'
     implementation 'org.springframework.boot:spring-boot-starter-validation'
     implementation 'org.springframework.boot:spring-boot-starter-actuator'
+    // Phase 17: linear-time regex (no catastrophic backtracking / ReDoS) for user-authored routing
+    // rule patterns. Compiled at save time and memoized on the eval path, never java.util.regex.
+    implementation 'com.google.re2j:re2j:1.7'
+    // Phase 17: validate severity/messageType rule values against the domain enums.
+    implementation project(':libs:common-domain')
     implementation project(':libs:common-security')
     // Phase 16 T3: acquire client_credentials service tokens for inter-service calls (identity, escalation).
     implementation 'org.springframework.boot:spring-boot-starter-oauth2-client'
