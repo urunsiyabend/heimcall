@@ -129,9 +129,6 @@ public class IncidentService {
         if (decision.unrouted()) {
             incident.markUnrouted();
         }
-        if (decision.fromCache()) {
-            incident.markRoutedFromCache();
-        }
 
         incidents.save(incident);
         alert.linkIncident(incident.getId());
@@ -153,19 +150,12 @@ public class IncidentService {
             timeline.save(TimelineEvent.of(incident.getId(), "ROUTED",
                     "Routed via " + via + " (ruleset v" + decision.rulesetVersion() + ")", at));
         }
-        if (decision.fromCache()) {
-            // Degraded routing: catalog was unavailable, so this paged on the last-known-good policy.
-            // Visible (timeline + counter), and a reconciliation job audits it after catalog recovery.
-            timeline.save(TimelineEvent.of(incident.getId(), "ROUTED_FROM_CACHE",
-                    "Catalog unavailable; paged from last-known-good routing (routingKey=" + event.routingKey()
-                            + ", policy=" + policyId + ")", at));
-        }
-        log.info("Alert {} opened incident {} dedupKey={} policy={} unrouted={} fromCache={}",
-                alert.getId(), incident.getId(), event.dedupKey(), policyId, decision.unrouted(), decision.fromCache());
+        log.info("Alert {} opened incident {} dedupKey={} policy={} unrouted={}",
+                alert.getId(), incident.getId(), event.dedupKey(), policyId, decision.unrouted());
 
         events.publishEvent(new IncidentDomainEvents.Triggered(incident.getId(), incident.getOrganizationId(),
                 incident.getDedupKey(), incident.getTitle(), incident.getSeverity(), policyId,
-                decision.matchedRuleId(), decision.unrouted(), decision.fromCache(), at));
+                decision.matchedRuleId(), decision.unrouted(), at));
     }
 
     private void recover(AlertReceivedEvent event, Alert alert, Instant at) {

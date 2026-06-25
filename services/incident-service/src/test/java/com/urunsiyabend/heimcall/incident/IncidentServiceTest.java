@@ -89,7 +89,7 @@ class IncidentServiceTest {
         UUID ruleId = UUID.randomUUID();
         when(alerts.findFirstByOrganizationIdAndDedupKeyAndStatus(ORG, DEDUP, AlertStatus.OPEN))
                 .thenReturn(Optional.empty());
-        when(routing.resolve(any())).thenReturn(new RoutingDecision(svc, policy, ruleId, 7L, false, false));
+        when(routing.resolve(any())).thenReturn(new RoutingDecision(svc, policy, ruleId, 7L, false));
 
         service.handle(event(MessageType.CRITICAL));
 
@@ -102,7 +102,6 @@ class IncidentServiceTest {
         assertThat(incident.getMatchedRuleId()).isEqualTo(ruleId);
         assertThat(incident.getRulesetVersion()).isEqualTo(7L);
         assertThat(incident.isUnrouted()).isFalse();
-        assertThat(incident.isRoutedFromCache()).isFalse();
         // Phase 17: a routed page records a ROUTED explainability line alongside TRIGGER.
         assertThat(savedTimelineTypes()).containsExactly("TRIGGER", "ROUTED");
 
@@ -211,7 +210,7 @@ class IncidentServiceTest {
     void critical_noMatch_marksUnroutedAndPublishesUnroutedTriggered() {
         when(alerts.findFirstByOrganizationIdAndDedupKeyAndStatus(ORG, DEDUP, AlertStatus.OPEN))
                 .thenReturn(Optional.empty());
-        when(routing.resolve(any())).thenReturn(new RoutingDecision(null, null, null, 3L, true, false));
+        when(routing.resolve(any())).thenReturn(new RoutingDecision(null, null, null, 3L, true));
 
         service.handle(event(MessageType.CRITICAL));
 
@@ -236,7 +235,7 @@ class IncidentServiceTest {
         when(alerts.findFirstByOrganizationIdAndDedupKeyAndStatus(ORG, DEDUP, AlertStatus.OPEN))
                 .thenReturn(Optional.empty());
         // matchedRuleId null = the ruleset fallback supplied the policy (not a specific rule).
-        when(routing.resolve(any())).thenReturn(new RoutingDecision(null, policy, null, 9L, false, false));
+        when(routing.resolve(any())).thenReturn(new RoutingDecision(null, policy, null, 9L, false));
 
         service.handle(event(MessageType.CRITICAL));
 

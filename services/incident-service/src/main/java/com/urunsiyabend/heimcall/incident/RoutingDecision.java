@@ -19,17 +19,17 @@ import java.util.UUID;
  * decisions); T2 reinstates outage tolerance via a local ruleset projection instead.
  */
 record RoutingDecision(UUID serviceId, UUID policyId, UUID matchedRuleId, long rulesetVersion,
-                       boolean unrouted, boolean fromCache) {
+                       boolean unrouted) {
 
     /** Map a routing-core decision (from local evaluation, Phase 17 T2) onto the incident shape. */
     static RoutingDecision fromCore(com.urunsiyabend.heimcall.routing.RoutingDecision d) {
         return new RoutingDecision(d.serviceId(), d.escalationPolicyId(), d.matchedRuleId(),
-                d.rulesetVersion(), d.unrouted(), false);
+                d.rulesetVersion(), d.unrouted());
     }
 
     /** Deliberate UNROUTED when the projection is cold and catalog is also unavailable — visible and
      *  counted, never a misroute. {@code rulesetVersion} 0 signals "no ruleset was applied". */
     static RoutingDecision unroutedFallback() {
-        return new RoutingDecision(null, null, null, 0L, true, false);
+        return new RoutingDecision(null, null, null, 0L, true);
     }
 }

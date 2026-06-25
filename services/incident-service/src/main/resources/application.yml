@@ -68,13 +68,13 @@ identity:
 heimcall:
   jwt:
     jwks-uri: ${HEIMCALL_JWT_JWKS_URI:http://localhost:8083/v1/.well-known/jwks.json}
-  # Phase 10 T4 routing availability cache: audit-only reconciliation of incidents paged from the
-  # last-known-good cache during a catalog outage. Scoped to routed_from_cache incidents (not a full
-  # cache sweep); capped per cycle, aborts if catalog is still down.
+  # Phase 17 T2 local routing ruleset projection. max-age = freshness window: beyond it a projection is
+  # reported STALE (routing keeps using the last-known ruleset, never drops) and the repair pull re-pulls
+  # it; reconcile-interval-ms drives that scheduled pull.
   routing:
-    reconcile:
-      interval-ms: ${HEIMCALL_ROUTING_RECONCILE_INTERVAL_MS:900000}
-      batch-size: ${HEIMCALL_ROUTING_RECONCILE_BATCH_SIZE:200}
+    projection:
+      max-age: ${HEIMCALL_ROUTING_PROJECTION_MAX_AGE:PT10M}
+      reconcile-interval-ms: ${HEIMCALL_ROUTING_PROJECTION_RECONCILE_INTERVAL_MS:300000}
 
 management:
   endpoints:
