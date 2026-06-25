@@ -2,7 +2,9 @@
 
 Living document. Update at the end of every sprint. Reflects what is actually built and running, not what is planned. Plan lives in `01-development-plan.md`; this file is the source of truth for "where are we now".
 
-Last updated: 2026-06-23 (Sprint 32 - Phase 16 T4 + **Phase 16 complete**: **NetworkPolicy default-deny (helm) + deferred T3 helm wiring.** `templates/networkpolicy.yaml` ships **18 policies** (gated `networkPolicy.enabled`): fleet default-deny ingress+egress; DNS egress; infra egress **by port** (5432/9092/6379/4318, so BYO/external infra works); per-service **ingress from its actual REST callers only** + **egress to its declared callees only**, generated from a `calls` graph in `values.yaml` (the caller→identity `/oauth2/token` mint hop rides the existing identity edge); gateway external ingress; configurable Prometheus ingress; notification **SSRF-guarded** webhook egress (public 80/443, private/cluster/link-local CIDRs denied — the documented exception for arbitrary customer webhooks) + SMTP 1025. Stable pod label `app.kubernetes.io/part-of=heimcall`. **Locked:** policy-aware CNI mandatory → verified on **Cilium 1.19.5 + Hubble** (kindnet silently ignores policies); full **per-pair** least-privilege. **Deferred T3 wiring carried in:** per-caller `HEIMCALL_TOKEN_URI` + `HEIMCALL_CLIENT_SECRET_<self>`, callee `HEIMCALL_SERVICE_NAME`, schedule/notification `serviceClientSecrets` — driven by per-service `clientName`/`serviceName` markers. **Redis wired** (was absent from helm): `redis` in kind `infra.yaml`, `infra.redis*`, `REDIS_HOST/PORT` for notification + gateway. **Gateway invariant test** `InternalRouteIsolationTest` (`/v1/internal/**` + `/oauth2/token` → 404 unrouted; real route → 5xx routed). Verified: `helm lint`/`template` clean (37 resources, 18 NetworkPolicies) + full suite green; **real-cluster e2e on Cilium+Hubble** (kind, full fleet — found+fixed stale pre-Phase-16 HS256 images mid-run, rebuilt fresh RS256): fleet `Running 1/1` under default-deny (no flow starved), product flow register→…→ingest→**TRIGGERED**→ack→**RESOLVED** with live token hops, **negative** notification→incident:8082 **dropped** (Hubble `Policy denied DROPPED`) while notification→identity:8083 connects. Documented: enforcement is CNI-dependent; webhook-SSRF/SMTP + Prometheus rules present but not live-exercised. **Phase 16 complete (T1-T4).**)
+Last updated: 2026-06-25 (Sprint 33 - **Phase 17 T1 + T2: routing rule engine + local read-model.** Replaced the flat `routingKey→service→policy` map with an **ordered, conditional decision table**. **T1** — a pure engine (extracted to `libs/routing-core` in T2): typed `ConditionNode` (ALL/ANY/NOT + field/operator/value leaves over SYSTEM/METADATA fields), 16 operators, RE2J regex (compiled at save, never per-event), org-timezone time-of-day windows (DST-aware), first-match-wins, pinned `fallbackAction`; missing/null/negative semantics designed to avoid PagerDuty's does-not-equal-matches-missing gotcha. service-catalog gains the storage (`routing_ruleset` + `routing_rule` jsonb, Flyway V4, version bumped per write; V4 migrated the old key-maps + org-default into rules+fallback), member-gated CRUD + reorder + fallback + **dry-run preview with a full per-predicate trace**, and a context-aware internal `POST …/routing/resolve`. incident-service stamps `matched_rule_id`/`ruleset_version` (V8), a `ROUTED` timeline line, `routing_rule_matched_total{ruleId}`. **T2** — catalog publishes a full **versioned ruleset snapshot** (`routing.ruleset-published.v1`, keyed by org) via a new **transactional outbox** (catalog's first producer; outbox table V5); incident consumes it into a **version-gated PG projection** (`routing_ruleset_projection`, V9) and **evaluates routing locally** with the shared `routing-core` engine — catalog leaves the hot path, so a catalog outage no longer affects routing (only delays the next version). Cold miss → one-time sync pull from catalog's `GET …/routing/ruleset` (→ UNROUTED if catalog also down); explicit projection states (READY/ABSENT_CONFIRMED/UNINITIALIZED/STALE) + apply-lag metric; a scheduled repair pull reconciles stale/missed snapshots; STALE keeps routing on the last-known ruleset (never drops). **Supersedes & removes the Phase 10 T4 `routing_cache` + reconciliation + the T1 DLT-on-outage** (V10 drops the table + `routed_from_cache`/`reconcile_*` columns). Verified: full `./gradlew build` green; new unit tests — evaluator semantics (17), wire round-trip (2), codec (5)/validator (10), projection version-gate (7), resolver states incl. cold-miss/stale (4); **runtime on real PG+Kafka** — V4/V5/V8/V9/V10 migrations applied, catalog V4 migration reproduced pre-Phase-17 routing (8 services → 8 rules + 6 rulesets), and a **live snapshot e2e**: produced a snapshot to the real broker → incident consumed → projection READY v3 (policy parsed from the serialized ruleset), then the **version gate proven live** (older v2 replay ignored, newer v4 applied). Deferred: full 4-service catalog-write→snapshot→route fleet run (the catalog→broker publish leg is build/wiring-verified, not live-fleet-run); the optional CEL advanced-expression mode + draft-vs-published rulesets are Phase 17 T3.)
+
+Earlier (Sprint 32 - Phase 16 T4 + **Phase 16 complete**: **NetworkPolicy default-deny (helm) + deferred T3 helm wiring.** `templates/networkpolicy.yaml` ships **18 policies** (gated `networkPolicy.enabled`): fleet default-deny ingress+egress; DNS egress; infra egress **by port** (5432/9092/6379/4318, so BYO/external infra works); per-service **ingress from its actual REST callers only** + **egress to its declared callees only**, generated from a `calls` graph in `values.yaml` (the caller→identity `/oauth2/token` mint hop rides the existing identity edge); gateway external ingress; configurable Prometheus ingress; notification **SSRF-guarded** webhook egress (public 80/443, private/cluster/link-local CIDRs denied — the documented exception for arbitrary customer webhooks) + SMTP 1025. Stable pod label `app.kubernetes.io/part-of=heimcall`. **Locked:** policy-aware CNI mandatory → verified on **Cilium 1.19.5 + Hubble** (kindnet silently ignores policies); full **per-pair** least-privilege. **Deferred T3 wiring carried in:** per-caller `HEIMCALL_TOKEN_URI` + `HEIMCALL_CLIENT_SECRET_<self>`, callee `HEIMCALL_SERVICE_NAME`, schedule/notification `serviceClientSecrets` — driven by per-service `clientName`/`serviceName` markers. **Redis wired** (was absent from helm): `redis` in kind `infra.yaml`, `infra.redis*`, `REDIS_HOST/PORT` for notification + gateway. **Gateway invariant test** `InternalRouteIsolationTest` (`/v1/internal/**` + `/oauth2/token` → 404 unrouted; real route → 5xx routed). Verified: `helm lint`/`template` clean (37 resources, 18 NetworkPolicies) + full suite green; **real-cluster e2e on Cilium+Hubble** (kind, full fleet — found+fixed stale pre-Phase-16 HS256 images mid-run, rebuilt fresh RS256): fleet `Running 1/1` under default-deny (no flow starved), product flow register→…→ingest→**TRIGGERED**→ack→**RESOLVED** with live token hops, **negative** notification→incident:8082 **dropped** (Hubble `Policy denied DROPPED`) while notification→identity:8083 connects. Documented: enforcement is CNI-dependent; webhook-SSRF/SMTP + Prometheus rules present but not live-exercised. **Phase 16 complete (T1-T4).**)
 
 Earlier (Sprint 31 - Phase 16 T3: **enforce service tokens on internal endpoints + client wiring.** `/v1/internal/**` and `POST /v1/integration-keys/resolve` flipped from `permitAll` to `authenticated()` + per-endpoint `@PreAuthorize("hasAuthority('SCOPE_…')")` (method security enabled in `common-security`). `JwtAuthenticationFilter` now also accepts a **service token addressed to this service** (new `heimcall.jwt.service-name` = the callee's `aud`): it maps the token's `scope` claim to `SCOPE_*` authorities, sets the caller (`sub`) as principal, and injects **no `X-User-Id`** (a service token is never a user). A user token authenticates but has no `SCOPE_*` → 403, so internal endpoints are machine-only. **Decision: pure service-token, no dual-token** — the locked user-context variant (`X-Internal-Authorization` + user JWT) was dropped because no internal endpoint reads the acting user from a header (all take explicit path params) and the call sites are machine-context (Kafka handler / key-auth ingest / scheduled engine) with no user JWT; the forged-`X-User-Id` concern holds by construction. Scope-per-endpoint: members→`identity.membership.read`, teams→**`identity.team.read`** (new), team-members→`identity.team-members.read`, key-resolve→`identity.integration-key.resolve`, routing→`catalog.routing.resolve`, policy→`escalation.policy.read`, on-call→`schedule.on-call.read`. **T2 matrix gaps closed** (`CLIENT_SCOPES`): catalog +`identity.membership.read`/`identity.team.read`; schedule + notification added (`identity.membership.read`); escalation +`identity.team.read`. Client side: each caller adds `spring-boot-starter-oauth2-client` + one `registration.<callee>` per callee; new `ServiceTokenClients`/`ServiceTokenInterceptor` (own `@AutoConfigureAfter` the oauth2-client autoconfig) attach the callee-scoped token to every `*Client` via Spring's `AuthorizedClientServiceOAuth2AuthorizedClientManager` (cached, refresh-before-`exp`). Verified: unit (`JwtT3Test`) + `InternalEndpointAuthzTest` (real `/oauth2/token` mint → gated endpoint: no-token 401 / wrong-`aud` 401 / wrong-scope 403 / correct 204) + full suite green; runtime (real PG/Kafka, bootJars): identity gate curl matrix + caller boot + **interceptor proven end-to-end** (integration ingest → real identity call; wrong-secret stack trace shows `ServiceTokenInterceptor → AuthorizedClientManager.authorize → mint → 401 invalid_client`). **Deferred to T4 (helm/k8s):** chart T3 env wiring (per-caller `HEIMCALL_CLIENT_SECRET_<self>` + `HEIMCALL_TOKEN_URI`, callee `HEIMCALL_SERVICE_NAME`, schedule/notification service-client secrets) + full-fleet kind e2e with every hop tokened + gateway-never-routes-`/v1/internal` test lock — folded into T4 since both touch helm. **Phase 16 T1-T3 done; T4 (NetworkPolicy + T3 helm wiring) remains.**)
 
@@ -15,6 +17,7 @@ Earlier (Sprint 30 - Phase 16 T2: service-token issuance via Spring Authorizatio
 | Architecture | Microservices-first monorepo, Gradle multi-project |
 | Build | `./gradlew build` green on Java 21 |
 | Runtime verified | Sprint 9 Phase-7 tickets 1-3.1: full loop under real JWT through the gateway (register/login -> token -> CRUD across all services -> ingest -> incident TRIGGER + NOTIFIED), JWT enforced (401 no-token, refresh-as-access rejected, client X-User-Id spoof stripped), incident queries tenant-scoped (cross-org 403) |
+| Sprint 33 | Phase 17 T1+T2 (routing rule engine + local read-model). Flat key→policy map replaced by an **ordered conditional decision table** in `libs/routing-core` (typed condition tree, 16 ops, RE2J, org-tz time windows, first-match + pinned fallback). service-catalog: storage (`routing_ruleset`/`routing_rule` V4, version-per-write; V4 migrated old maps→rules), member-gated CRUD/reorder/fallback + **preview with per-predicate trace** + context-aware `POST …/routing/resolve`; publishes full **ruleset snapshots** via a new outbox (V5). incident-service: version-gated **PG projection** (`routing_ruleset_projection` V9) consumed from `routing.ruleset-published.v1` and **evaluated locally** (catalog off the hot path; outage-tolerant), cold-miss sync hydration + scheduled repair pull + explicit states/metrics; stamps `matched_rule_id`/`ruleset_version` (V8) + `ROUTED` timeline. **Removed** the Phase 10 T4 `routing_cache`+reconciliation+DLT-on-outage (V10 drop). Verified: full build green + new unit suites (evaluator/codec/validator/version-gate/resolver-states ~45 tests); runtime on real PG+Kafka — migrations applied, V4 reproduced pre-Phase-17 routing (8 rules/6 rulesets), **live snapshot e2e** (broker→consume→projection READY) incl. **version gate proven live** (older ignored, newer applied). Deferred: full fleet catalog-write→route run; CEL mode + draft/publish are T3. |
 | Sprint 32 | Phase 16 T4 + **Phase 16 complete** (NetworkPolicy + T3 helm wiring). `templates/networkpolicy.yaml`: 18 policies — fleet default-deny ingress+egress, DNS egress, infra egress by port (5432/9092/6379/4318), **per-service ingress-from-callers + egress-to-callees** from a `calls` graph, gateway external ingress, Prometheus ingress, notification **SSRF-guarded** webhook egress (public minus private/cluster CIDRs) + SMTP 1025. Deferred T3 wiring carried in (`HEIMCALL_TOKEN_URI`/`HEIMCALL_CLIENT_SECRET_<self>`/`HEIMCALL_SERVICE_NAME`, schedule+notification secrets). **Redis wired** into helm (kind infra + `REDIS_HOST/PORT` for notification/gateway) — was previously absent. `InternalRouteIsolationTest` locks gateway-never-routes-`/v1/internal`. Verified on a real **Cilium 1.19.5 + Hubble** kind cluster (kindnet ignores policies): full fleet Running under default-deny, product flow register→…→TRIGGERED→RESOLVED with live token hops, and a non-allowed pod-pair (notification→incident:8082) **dropped** with Hubble `Policy denied DROPPED`; allowed pair (notification→identity:8083) connects. Stale pre-Phase-16 HS256 images found+rebuilt fresh (RS256) mid-verify. `helm lint`/`template` clean (37 resources, 18 NetworkPolicies); full suite green. Enforcement is CNI-dependent (documented). |
 | Sprint 31 | Phase 16 T3 (security hardening — enforce). Internal APIs (`/v1/internal/**` + key-resolve) now require a **service token** addressed to the callee (`heimcall.jwt.service-name`) with the endpoint's exact scope, via `@PreAuthorize`/`SCOPE_*` (method security in `common-security`); `JwtAuthenticationFilter` maps the token's `scope`→authorities and injects no `X-User-Id`. **Pure service-token** (dropped the locked dual-token: no internal endpoint reads a header-user; call sites are machine-context). New scope `identity.team.read`; T2 `CLIENT_SCOPES` gaps closed (catalog/schedule/notification/escalation). Callers wired with `spring-boot-starter-oauth2-client` + per-callee registrations + `ServiceTokenClients`/`ServiceTokenInterceptor` (client_credentials via `AuthorizedClientServiceOAuth2AuthorizedClientManager`). Verified: `JwtT3Test` + `InternalEndpointAuthzTest` (mint→gated: 401/401/403/204) + full suite; runtime curl gate matrix + interceptor proven end-to-end (wrong-secret → `ServiceTokenInterceptor → mint → 401 invalid_client`). Helm env wiring + kind full-fleet e2e + gateway route-lock test **deferred to T4** (both touch helm). |
 | Last sprint | Sprint 27 - Phase 14 T2 + **Phase 14 complete** (Redis activation). **notification cooldown.** `NotificationService`'s fan-out loop now calls `CooldownService.tryReserve(incidentId, userId, channel)` before each `NotificationDelivery.pending(...)` save — `SET notification-cooldown:{incidentId}:{userId}:{channel} <ts> EX <window> NX` via `StringRedisTemplate.opsForValue().setIfAbsent(key, ts, Duration)`. Reserved → create the delivery; key already present → **suppress** (no delivery, `notification.cooldown.suppressed` counter +1, warn log). Collapses repeat pages when escalation requests a notification at multiple levels/rounds for one incident+user. **Fail-open**: any Redis error in `tryReserve` → returns true → the page proceeds (cooldown is never the source of truth, §3.2). Config: `notification.cooldown.enabled` (default true) + `window-seconds` (default 60); `spring.data.redis.host/port` added (servlet service → non-reactive lettuce). Idempotency: the request-id `existsById` guard runs before fan-out, so a redelivered request never re-reserves. **Accepted trade-off (documented):** the reserve writes to Redis inside the fan-out `@Transactional`, not enlisted in the DB tx, so a rare rollback after a reserve leaves the key set until expiry (could suppress the next page in-window); fan-out does only local DB saves (low rollback risk) + the key self-expires, so no compensating delete. Verified: `:notification-service:test` 12 pass / 1 skipped (claim test, no PG) incl. new `cooldownSuppressesTheChannelAndCountsIt`; service boots Redis-wired (readiness UP, zero Redis errors); real-Redis SET NX EX proven (first OK, repeat nil, TTL set). Full Kafka→delivery e2e left to the manual fleet gate (needs a `__TypeId__`-header producer). **Phase 14 done (T1 gateway rate limit + T2 cooldown).** Redis now wired into 2 services; locks/idempotency-cache/on-call-cache deliberately not on Redis (regress/redundant/low-value). |
@@ -47,7 +50,8 @@ Earlier (Sprint 30 - Phase 16 T2: service-token issuance via Spring Authorizatio
 ```
 libs/
   common-domain     enums: MessageType, Severity, IncidentStatus, AlertStatus
-  common-events      event records (Alert*, Incident triggered/acknowledged/resolved/canceled, Notification*), Topics constants. Incident lifecycle events share one ordered topic `incident.lifecycle.v1` (Phase 12; the 4 per-event topic constants removed) — type carried in `__TypeId__`.
+  common-events      event records (Alert*, Incident triggered/acknowledged/resolved/canceled, Notification*, **RoutingRulesetSnapshotEvent** Phase 17 T2), Topics constants. Incident lifecycle events share one ordered topic `incident.lifecycle.v1` (Phase 12; the 4 per-event topic constants removed) — type carried in `__TypeId__`. Depends on `routing-core` (the snapshot carries a `Ruleset`).
+  routing-core       (Phase 17 T2) pure routing decision engine, NO Spring/JPA: condition model (`ConditionNode`/`FieldRef`/`Operator`/`RoutingAction`/`TimeRestriction`/`Rule`/`Ruleset`), `RoutingContext`/`RoutingDecision`, `RoutingPredicateEvaluator` + `TreeRoutingEvaluator` (first-match, RE2J, org-tz). Jackson-annotated so the ruleset crosses the wire as a snapshot. Shared by service-catalog (authoring/preview) + incident (local hot-path eval) so both decide identically.
   common-security    HS256 JWT auto-config: JwtSupport (issue/verify), JwtAuthenticationFilter (Bearer -> principal + derives X-User-Id), stateless SecurityFilterChain. Added by every service via one dependency.
   common-observability  (Phase 8 T1-T4a) auto-config: logstash JSON logback, servlet CorrelationIdFilter (X-Correlation-Id in/out via MDC), Kafka CorrelationProducerInterceptor (stamps id on outbound records) + CorrelationRecordInterceptor (lifts id back into MDC on every listener); micrometer-registry-prometheus + native Kafka client metrics; (T4a) micrometer-tracing-bridge-otel + OTLP exporter, KafkaTracing BPP enabling observation on the services' own KafkaTemplate/listener factory beans, traceId/spanId in the JSON logs, TracingDefaultsEnvironmentPostProcessor (sampling + OTLP endpoint defaults). Added by every service via one dependency.
   common-outbox     (Phase 9 T1) transactional outbox auto-config: OutboxAppender (JdbcTemplate INSERT into `outbox`, joins the caller's tx), OutboxRelay (@Scheduled FOR UPDATE SKIP LOCKED poll -> confirmed publish via a non-bean byte[] KafkaTemplate so the KafkaTracing BPP can't clobber the stored headers -> mark PUBLISHED), OutboxPrune (delete PUBLISHED past retention). Phase 12: the relay claim has a **per-aggregate ordering guard** (`NOT EXISTS lower-id PENDING same aggregate_id`) so per-aggregate publish order holds even across multiple relay instances. Forwards `__TypeId__` + `X-Correlation-Id` + `traceparent`. Wired into all four producing services:
@@ -56,10 +60,10 @@ libs/
 services/
   api-gateway        Spring Cloud Gateway, routes -> catalog 8084, schedule 8085, escalation 8086, identity 8083 (incl. /v1/auth/**), integration 8081, incident 8082; CORS for the UI origin; forwards Authorization (validation is per-service); **Redis token-bucket rate limit on the integration ingest route, keyed per integrationKey (Phase 14 T1)**
   identity-service   auth (register/login/refresh/me, JWT) + org/user/team/membership CRUD + integration-key issue/resolve + internal lookups, incl. team-member list (port 8083)
-  service-catalog-service  monitored services CRUD + team ownership + tags + routing-key + validated escalation-policy + routing lookup (port 8084)
+  service-catalog-service  monitored services CRUD + team ownership + tags + validated escalation-policy + **routing rule engine** (ordered conditional decision table, authoring CRUD + preview + internal resolve + ruleset snapshot publish via outbox, Phase 17) (port 8084)
   schedule-service   on-call schedules, daily/weekly rotations, overrides, timezone-aware on-call resolution + internal on-call (port 8085)
   integration-service  webhook ingestion -> resolves key via identity -> stores raw -> publishes alert.received.v1 (acks=all)
-  incident-service   consumes alert.received.v1 -> Event->Alert->Incident (alert dedup aggregate + occurrence log) -> routing/policy stamp -> timeline; lifecycle REST commands ACK/resolve/cancel; publishes incident.* (incl. canceled); DLT on failure
+  incident-service   consumes alert.received.v1 -> Event->Alert->Incident (alert dedup aggregate + occurrence log) -> routing/policy stamp (evaluates the **local ruleset projection** with routing-core, Phase 17 T2) -> timeline; consumes routing.ruleset-published.v1 into the projection (version-gated); lifecycle REST commands ACK/resolve/cancel; publishes incident.* (incl. canceled); DLT on failure
   escalation-service consumes incident.triggered -> runs policy (level tasks, worker, repeat) -> resolves targets -> notification.requested; cancels on ACK/RESOLVE (port 8086)
   notification-service consumes notification.requested -> fans out to recipient contact methods -> delivers (email/webhook) with bounded retry -> notification.delivered/failed (port 8087)
 deploy/
@@ -107,15 +111,36 @@ Ports: api-gateway 8080, integration 8081, incident 8082, identity 8083, service
 - Escalation policy: `PUT .../services/{id}/escalation-policy {escalationPolicyId}` - **validated** against
   escalation-service (`EscalationClient`): unknown/foreign policy -> 409, escalation unreachable -> 503
 - Routing key: `PUT .../services/{id}/routing-key {routingKey}` - maps an inbound alert routingKey to this
-  service, unique per org (`routing_key`, Flyway V2)
+  service, unique per org (`routing_key`, Flyway V2). **Deprecated by Phase 17** (kept; the engine migrated
+  it to a rule) — no longer the resolution path.
 - Tags: `PUT/GET/DELETE .../services/{id}/tags` - key/value, unique per (service, key)
 - Org-default catch-all policy (Phase 10 T2): `PUT/GET/DELETE /v1/organizations/{orgId}/routing-default`
-  - member-gated; `PUT {escalationPolicyId}` validated against escalation-service (unknown/foreign -> 409),
-  one row per org (`org_routing_default`, Flyway V3); DELETE idempotent (204). Makes routing **total**.
-- Internal routing lookup (service-to-service): `GET /v1/internal/organizations/{orgId}/routing?routingKey=`
-  -> `{serviceId, escalationPolicyId, ownerTeamId}`. **Total** resolution (Phase 10 T2): specific service with
-  a policy → that policy; else (no service, or matched service with no policy) → org default if configured;
-  else 404. A 200 never carries a null `escalationPolicyId`. Used by incident-service.
+  (`org_routing_default`, Flyway V3). **Deprecated by Phase 17** (kept; migrated into the ruleset
+  `fallbackAction`). No longer read on the resolve path.
+- **Routing rule engine (Phase 17 T1)** — an ordered, conditional decision table replaces the flat
+  key→service→policy map. Pure engine lives in `libs/routing-core` (shared with incident, Phase 17 T2):
+  a typed `ConditionNode` tree (`ALL`/`ANY`/`NOT` groups + `field/operator/value` leaves over SYSTEM /
+  METADATA fields), 16 operators, RE2J regex (compiled at save, never per-event), org-timezone
+  time-of-day restrictions (DST-aware), first-match-wins, pinned `fallbackAction`. Missing/null/negative
+  semantics designed to avoid PagerDuty's "does-not-equal also matches missing" gotcha.
+  - Storage (Flyway V4): `routing_ruleset` (PK org, monotonic `version`, `timezone`, `fallback_*`) +
+    `routing_rule` (ordered `position`, `condition_json` jsonb, `action_*`, `time_restriction_json`). Every
+    rule write bumps `version`. V4 migrated each `monitored_service` with a routing_key+policy into one
+    `EQUALS routingKey` rule and seeded the fallback from `org_routing_default`.
+  - Authoring CRUD (member-gated): `POST/GET/PUT/DELETE /v1/organizations/{orgId}/routing-rules` +
+    `.../order` (reorder) + `.../fallback` (GET/PUT/DELETE; PUT also sets the ruleset IANA timezone).
+    Condition validated at save (known fields, operator/value arity, RE2J compiles, severity/messageType
+    enum values, IANA zone) → 400; service/policy refs validated (service in org; policy via
+    `EscalationClient`) → 409; shadowing warning (unconditional rule hiding later ones) non-fatal.
+  - Dry-run preview: `POST .../routing-rules/preview {sample event}` → `RoutingDecision` **with the full
+    per-predicate trace** (which rule matched + why each earlier one did not), no incident created.
+  - Internal resolve (service-to-service): `POST /v1/internal/organizations/{orgId}/routing/resolve`
+    taking the full `RoutingContext` (built from the alert) → `RoutingDecision {serviceId,
+    escalationPolicyId, matchedRuleId, rulesetVersion, unrouted}`. Replaces the Phase 10 `GET …/routing?routingKey=`.
+  - Snapshot publish (Phase 17 T2): every rule write also appends a full `RoutingRulesetSnapshotEvent`
+    (`routing.ruleset-published.v1`, keyed by org) to the **transactional outbox** (new `outbox` table
+    Flyway V5 + Kafka wiring — catalog's first producer); `GET /v1/internal/.../routing/ruleset` serves the
+    same snapshot for incident's pull-based hydration/reconciliation.
 
 ### schedule-service (port 8085)
 - Tenant rules enforced via identity internal API (`IdentityClient`): caller membership (403) and that
@@ -170,27 +195,33 @@ Ports: api-gateway 8080, integration 8081, incident 8082, identity 8083, service
   - each appends a timeline event (records the actor) and publishes the matching domain event; the
     linked OPEN/ACK alerts are transitioned to follow the incident (ACK -> ACKNOWLEDGED, resolve/cancel -> CLOSED)
   - `reassign` not built (needs `IncidentAssignment`); cancel emits the new `incident.canceled.v1`
-- Routing/ownership stamping (Phase 5 + Phase 10): on a new trigger, routing is resolved through
-  `RoutingAvailabilityResolver` (wraps `CatalogClient`) to `{serviceId, escalationPolicyId}` and stamped
-  (Flyway V3). After Phase 10 T2 catalog resolution is **total**, so a live resolve is one of two things: a
-  policy (ROUTED) or a definitive no-match (`Optional.empty()`). A definitive no-match (T3) creates the
-  incident flagged `unrouted=true` (Flyway V6, `incident.unrouted`): a distinct `UNROUTED` timeline event,
-  the `incident_unrouted_total` counter, and `unrouted` on the query response (+ UI badge). No policy is
-  stamped, so `incident.triggered.v1` carries `policyId=null` and escalation short-circuits — "nobody paged"
-  is a visible, counted decision, never a silent fallthrough.
-- Routing **availability** cache (Phase 10 T4): the resolver maintains a `routing_cache` table (Flyway V7,
-  PG, **no TTL**, write-through on every live 200, tombstone on a 404). A catalog **outage** is NOT a
-  no-match: the resolver falls back to the cached last-known-good route (`RoutingDecision.fromCache`) so the
-  incident is created `routed_from_cache=true` (Flyway V7), gets a `ROUTED_FROM_CACHE` timeline event + the
-  `incident_routed_from_cache_total` counter + a UI badge, and **escalation still fires on the cached policy**
-  instead of the alert being dead-lettered. Only if there is **no** cached route (a never-seen routingKey
-  during an outage) does the resolver re-throw `RoutingUnavailableException` → retry/DLT + tx rollback, no
-  orphan (the T1 behavior). An audit-only `@Scheduled` `RoutingReconciliationJob` (scoped to
-  `routed_from_cache` incidents with `reconciled_at IS NULL`, grouped by distinct `(org, routingKey)`, capped
-  per cycle, aborts the cycle while catalog is still down) re-resolves after recovery and stamps
-  `incident.reconcile_result` = `CURRENT_MATCH` / `CURRENT_DRIFT` (→ `routing_cache_drift_total` + refresh
-  cache) / `CURRENT_NOT_FOUND` (→ tombstone the cache row). It never re-pages and never mutates the incident's
-  route; `CURRENT_*` means "catalog differs now", not "the cached route was wrong at outage time".
+- Routing/ownership stamping (Phase 5 + Phase 10 + Phase 17): on a new trigger, `RoutingAvailabilityResolver`
+  evaluates the org's **locally replicated ruleset** (Phase 17 T2) with the shared `routing-core` engine and
+  stamps `{serviceId, escalationPolicyId, matchedRuleId, rulesetVersion}` (Flyway V8). A routed page also
+  writes a short `ROUTED` timeline line (matched rule or fallback + ruleset version) + a
+  `routing_rule_matched_total{ruleId}` counter; a definitive no-match (T3, still) flags `unrouted=true`
+  (Flyway V6): `UNROUTED` timeline, `incident_unrouted_total`, `unrouted` on the response (+ UI badge), and
+  `incident.triggered.v1` carries `policyId=null` so escalation short-circuits — "nobody paged" stays a
+  visible, counted decision.
+- **Local ruleset read-model (Phase 17 T2)** — catalog is off the hot path. A `@KafkaListener` consumes
+  `routing.ruleset-published.v1` into `routing_ruleset_projection` (Flyway V9, PK org, `version`,
+  `payload_json` = serialized routing-core `Ruleset`, `state`, `observed_at`); the upsert is **version-gated**
+  (apply only if strictly newer → duplicate/out-of-order delivery safe), DB commit before offset advance
+  (versioned at-least-once). Routing then evaluates that ruleset **in-process**, so a catalog outage no
+  longer affects routing — only delays the next version. Persisted in incident's own DB, so a restart/
+  scale-up inherits it (no process cold start).
+  - Cold miss (UNINITIALIZED — new tenant / DB restore): a one-time synchronous pull from catalog's
+    `GET …/routing/ruleset` hydrates the projection then serves; if catalog is also down → deliberate
+    UNROUTED (visible/counted, never a misroute).
+  - States are explicit (`READY` / `ABSENT_CONFIRMED` / `UNINITIALIZED` / `STALE`), exported as gauges +
+    a `routing.projection.apply_lag` timer; freshness policy = `heimcall.routing.projection.max-age` (PT10M):
+    beyond it a projection is STALE but **keeps routing on the last-known ruleset** (never drops) and a
+    `@Scheduled` repair pull re-pulls it (catches missed snapshots / DB-restore gaps).
+  - **Supersedes & removes** the Phase 10 T4 last-known-good `routing_cache` + its audit reconciliation and
+    the T1 DLT-on-catalog-outage behavior (Flyway V10 drops `routing_cache` + `routed_from_cache` /
+    `reconciled_at` / `reconcile_result`): the durable, versioned projection generalizes "last route per key"
+    to "the ruleset that produces the route", and tolerates outages correctly (a key-only cache would
+    misroute a different-field event).
 - Domain events (Phase 9 T1, transactional outbox; Phase 12 single topic): `IncidentEventPublisher` is a
   synchronous `@EventListener` that appends the four lifecycle events to the `outbox` table inside the
   lifecycle transaction (via `common-outbox`'s `OutboxAppender`), all to the one ordered topic
@@ -198,11 +229,13 @@ Ports: api-gateway 8080, integration 8081, incident 8082, identity 8083, service
   order. A rolled-back change writes no row (no ghost); a committed one is never lost
   (the prior `AFTER_COMMIT` `KafkaTemplate.send` could drop on a crash/broker-outage). At-least-once;
   consumers idempotent. The old `events*` producer beans in `KafkaConfig` were removed.
-- Persistence (Flyway V1-V7): `incident` (`alert_count` dropped in V4; still carries `routing_key`,
+- Persistence (Flyway V1-V10): `incident` (`alert_count` dropped in V4; still carries `routing_key`,
   `service_id`, `escalation_policy_id`, `dedup_key`/`source`/`external_entity_id`, + `unrouted` boolean V6,
-  + `routed_from_cache` boolean / `reconciled_at` / `reconcile_result` V7), `incident_timeline_event`,
-  `alert`, `alert_occurrence`, `outbox` (V5: id BIGINT identity, topic/key/payload/headers/status, PENDING->PUBLISHED),
-  `routing_cache` (V7: PK `(organization_id, routing_key)`, last-known-good route, no TTL)
+  + `matched_rule_id` / `ruleset_version` V8; the Phase 10 T4 `routed_from_cache` / `reconciled_at` /
+  `reconcile_result` columns **dropped in V10**), `incident_timeline_event`, `alert`, `alert_occurrence`,
+  `outbox` (V5: id BIGINT identity, topic/key/payload/headers/status, PENDING->PUBLISHED),
+  `routing_ruleset_projection` (V9: PK org, `version`, `payload_json` jsonb, `state`, `observed_at` — the
+  Phase 17 T2 local ruleset read-model). `routing_cache` **dropped in V10** (superseded by the projection).
   - Incident-level partial unique index `(organization_id, dedup_key) WHERE status IN (TRIGGERED, ACKNOWLEDGED)`
     kept as a backstop alongside the alert-level open-dedup index.
 - Notification feedback loop (Phase 7 ticket 1): a second `@KafkaListener` (group
@@ -361,6 +394,7 @@ Ports: api-gateway 8080, integration 8081, incident 8082, identity 8083, service
 - `incident.lifecycle.v1` (incident-service -> escalation-service): one ordered, `incidentId`-keyed stream carrying TRIGGERED/ACKNOWLEDGED/RESOLVED/CANCELED (Phase 12; replaced the four per-event topics so an ACK can't be processed before the TRIGGERED it cancels) + `incident.lifecycle.v1.DLT`
 - `notification.requested.v1` (escalation-service -> notification-service) + `notification.requested.v1.DLT`
 - `notification.delivered.v1` / `notification.failed.v1` (notification-service -> incident-service: appended to the incident timeline as NOTIFIED/NOTIFY_FAILED)
+- `routing.ruleset-published.v1` (service-catalog -> incident-service, Phase 17 T2): full per-org routing ruleset snapshot, **keyed by organizationId**, published via the catalog outbox on every rule write; incident version-gates it into the local `routing_ruleset_projection`. Consumed by `incident-service.routing-snapshot-consumer`.
 
 ## 5. Verified end-to-end (Sprint 9)
 
@@ -399,7 +433,11 @@ Sprint 2: idempotency, DLT, broker-outage 503. Sprint 1: dedup, recovery, timeli
 | Token revocation / introspection, refresh-token rotation/revocation, sender-constrained tokens | later (next horizon) |
 | ~~Redis cache for integration-key resolution + cross-service tenant checks (latency)~~ MEASURED NOT WORTH IT: k6 load test (perf-mode CPU) showed the sync resolve hop is ~2-3ms and flat under load, not a bottleneck; ingest throughput is pod-CPU-bound (1 core), not connection/latency-bound. Earlier apparent saturation was the laptop's CPU governor (balanced→performance fixed it). | dropped (latency); routing **availability** cache is a separate Phase 10 follow-up |
 | Ingest held a DB connection across the identity resolve network call (resolve was inside `@Transactional`) | DONE Sprint 15: `AlertEventWriter` split so resolve runs outside the tx |
-| Incident routing: a transient catalog outage silently de-paged real incidents (resolve swallowed all errors) | DONE Phase 10 T1-T4. T1: 404 vs failure distinguished → retry/DLT, no orphan. T2: org-default catch-all → routing total. T3: genuine no-match → visible, counted `UNROUTED`. T4: routing-availability cache → outage pages from last-known-good (`routed_from_cache`), DLT only for a never-seen key; audit-only reconciliation. **Phase 10 complete** |
+| Incident routing: a transient catalog outage silently de-paged real incidents (resolve swallowed all errors) | DONE Phase 10 T1-T4. T1: 404 vs failure distinguished → retry/DLT, no orphan. T2: org-default catch-all → routing total. T3: genuine no-match → visible, counted `UNROUTED`. T4: routing-availability cache → outage pages from last-known-good. **Superseded by Phase 17 T2** (local ruleset projection + local eval); the T4 `routing_cache` + reconciliation removed (V10) |
+| ~~Routing was a single flat `routingKey→service→policy` map — no severity/source/metadata/time-of-day conditions~~ DONE Phase 17 T1: ordered conditional decision table (`routing-core` engine, RE2J, org-tz windows, first-match + fallback), authoring CRUD + preview, context-aware resolve | Phase 17 T1 |
+| ~~Catalog on the routing hot path: an outage blocked routing (T1 fell to DLT)~~ DONE Phase 17 T2: incident replicates the ruleset (versioned snapshot → version-gated local projection) and evaluates locally; catalog outage only delays the next version | Phase 17 T2 |
+| Routing T3 not built: CEL "advanced expression mode" behind the `RoutingPredicateEvaluator` seam; draft-vs-published rulesets (Save ≠ change prod routing); richer shadow/overlap UI analysis | Phase 17 T3 (deferred) |
+| Phase 17 not run as a full 4-service live fleet (catalog rule write → snapshot → incident projection → local route in one run); the consume→project→eval leg + version gate are live-verified on the real broker, the catalog→broker publish leg is build/wiring-verified | live-fleet e2e backlog |
 | ~~Integration ingest endpoint unprotected (no rate limit, §15)~~ DONE Phase 14 T1: gateway Redis token-bucket rate limit keyed per integrationKey → 429 over-limit, fail-open if Redis down | Phase 14 T1 |
 | ~~Redis in compose but wired into zero services~~ DONE Phase 14: gateway rate limit (T1) + notification cooldown (T2). Locks/idempotency-cache/on-call-cache deliberately not on Redis (regress/redundant/low-value) | Phase 14 complete |
 | RBAC beyond membership (role stored, not enforced per-action) | later |
@@ -482,6 +520,12 @@ overridable via `HEIMCALL_JWT_SECRET`. The api-gateway also needs `HEIMCALL_UI_O
 `http://localhost:5173`.)
 
 ## 8. Next sprint
+
+**Now: Phase 17 T1+T2 complete (routing rule engine + local read-model).** Candidate next work:
+Phase 17 **T3** (CEL advanced-expression mode behind the `RoutingPredicateEvaluator` seam; draft-vs-published
+rulesets; shadow/overlap UI analysis); a **full 4-service live-fleet e2e** of catalog-write→snapshot→local-route;
+a routing-rules authoring **UI** in `web/`; helm/k8s wiring for catalog's new Kafka producer + the
+`routing.ruleset-published.v1` topic. (History below is Phase 7-era and retained for context.)
 
 Phases 1 + 3 + 4 + 5 + 6 + 7 complete; the trigger->notify loop is closed end to end, incidents have
 real lifecycle REST commands, and a React UI (`web/`) drives auth + incident triage with live SSE
