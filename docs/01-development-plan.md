@@ -1751,7 +1751,7 @@ policy); notification fan-out to multiple targets stays a separate, future conce
 
 ### Ticket breakdown
 
-- **T1 - Engine + control plane in service-catalog (incident-service unchanged, sync, consistency-first).**
+- **T1 (DONE, 2026-06-25) - Engine + control plane in service-catalog (incident-service unchanged, sync, consistency-first).**
   - New `routing` module/package **inside service-catalog-service** (NOT a shared lib yet — catalog is the
     only consumer in T1): condition-model types (`ConditionNode` = `Group{op: ALL|ANY|NOT, children}`
     or `Leaf{field, operator, value}`; `FieldRef{kind: SYSTEM|METADATA, name/key}`; `Operator` enum;
@@ -1804,7 +1804,7 @@ policy); notification fan-out to multiple targets stays a separate, future conce
     matched rule + trace without an incident; a catalog outage -> DLT, no orphan, no misroute; the
     migrated flat mappings reproduce pre-Phase-17 routing.
 
-- **T2 - Local ruleset read-model in incident-service (catalog off the hot path; consistency AND
+- **T2 (DONE, 2026-06-25) - Local ruleset read-model in incident-service (catalog off the hot path; consistency AND
   availability).** Routing is `f(event, ruleset)`; the event is already local, so replicate the only
   remote input — the ruleset — and the catalog hot-path call disappears entirely.
   - service-catalog publishes the **full ruleset as a versioned snapshot** on every change:
