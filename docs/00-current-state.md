@@ -715,3 +715,18 @@ the compose PG — revisit if CI needs container-isolated tests.
 
 Plus cross-cutting hardening still open (Redis caches/cooldown, `processed_event` TTL,
 `reassign` + `IncidentAssignment`; JWT secret rotation/RS256 now closed by Phase 16 T1).
+
+**Phase 17 - Routing Rule Engine** (specced 2026-06-25, not built — next). Replaces the flat
+`routingKey -> service -> policy` map (+ Phase 10 T2 org-default) with an ordered, conditional **decision
+table**: typed condition tree (ALL/ANY/NOT + field/operator/value, no expression language; CEL deferred
+behind an interface), first-match-wins, with the catch-all as a separate `fallbackAction` (not a rule) so
+every ruleset is total. **T1**: engine + control plane in service-catalog (rule CRUD/validate/preview,
+authoritative storage, context-aware internal resolve, RE2J regex, migrate the existing flat map to rules);
+incident-service unchanged (sync resolve), catalog outage → DLT (consistency-first; the Phase 10 T4
+`routingKey`-keyed cache is unsafe once routing depends on >1 field). **T2**: catalog publishes the ruleset
+as a versioned full snapshot (`routing.ruleset-published.v1` via `common-outbox`); incident-service keeps a
+PG read-model (`routing_ruleset_projection`, version-gated upsert) and **evaluates locally** — catalog
+leaves the hot path (consistency AND availability); cold-miss lazy-sync + reconciliation pull + explicit
+projection states (READY/ABSENT_CONFIRMED/UNINITIALIZED/STALE). The shared evaluator (`libs/routing-core`,
+extracted from catalog only in T2) is a pure engine + rules-as-data (OPA / feature-flag-SDK pattern), not
+shared domain logic. Full spec + Research notes (decision record + sources) in plan Phase 17.

@@ -1670,6 +1670,286 @@ possible. So the phase is sequenced trust-spine first, then identity, then enfor
 
 **Phase 16 complete** (T1-T4).
 
+## Phase 17 - Routing Rule Engine (conditional, ordered routing)
+
+Goal: replace today's flat `routingKey -> service -> escalation policy` map (service-catalog-service,
+plus the Phase 10 T2 org-default catch-all) with an **ordered, conditional routing rule engine**. Real
+alerts must route on more than a single key — severity, source, message type, payload metadata, and
+time-of-day. The engine is a **deterministic decision table**, not a general-purpose business-rules
+engine: an event comes in, rules are evaluated in order, the first match selects the target, and a
+pinned fallback runs if nothing matches. Routing produces exactly one target (a service + escalation
+policy); notification fan-out to multiple targets stays a separate, future concern.
+
+### Design decisions (locked 2026-06-24, research-driven — see Research notes below)
+
+- **Deterministic decision table, first-match-wins.** Rules are ordered by `position`; the first rule
+  whose condition matches selects the target and evaluation stops. This is the industry norm for the
+  *routing decision* (PagerDuty Router, Opsgenie routing rules, Datadog On-Call, Grafana routes). The
+  "all matching rules apply / merge recipients" behavior (Datadog monitor notification rules, PagerDuty
+  rule "continue") is a **notification fan-out** concern, explicitly NOT part of routing here.
+- **Structured typed condition tree, not an expression language.** Conditions are a nestable
+  `ALL`(AND) / `ANY`(OR) / `NOT` group tree with typed `field / operator / value` leaves, persisted as
+  JSON. No free-text expression language in this phase — it is injection-free, UI-buildable, and
+  validatable at save time. The evaluator sits behind a `RoutingPredicateEvaluator` interface so a
+  `CelPredicateEvaluator` (Google CEL) can be added later as an advanced "expression mode" escape hatch
+  if a real need appears. **CEL stays backstage** — direct tree interpretation makes explainability
+  ("rule 3 didn't match because `metadata.env` existed but wasn't `prod`") far easier and avoids a
+  second semantic layer (tree -> CEL coercion/null/regex differences).
+- **The catch-all is NOT a rule — it is a separate `fallbackAction`.** In the UI it looks like a pinned
+  last row, but in the data model it is a distinct field on the ruleset, not an entry in the ordered
+  rule list. This makes it undeletable / non-reorderable, makes every published ruleset **total**
+  (always produces an outcome for any event), and keeps "empty-condition normal rule" from being
+  confused with the system fallback. `fallbackAction` defaults to the existing Phase 10 T2 org routing
+  default if configured, else `UNROUTED` (Phase 10 T3 behavior — visible, counted, never silent).
+- **Missing / null / type-mismatch semantics are the load-bearing decision, not the operator list.**
+  Heimcall deliberately does NOT inherit PagerDuty's negative-operator gotcha (where "does not equal"
+  also matches events missing the field). Rules:
+  | Situation | Result |
+  | --- | --- |
+  | positive leaf (`EQUALS`, `CONTAINS_*`, `STARTS_WITH`, `MATCHES_REGEX`, `GT`/`LT`/...), field **missing** | `false` |
+  | `NOT_EQUALS` / `NOT_CONTAINS_*` / `NOT_MATCHES_REGEX`, field **present** and condition not met | `true` |
+  | the same negative leaf, field **missing** | `false` (does NOT match on absence — use `NOT_EXISTS` for that) |
+  | `EXISTS` | `true` iff the field is present (even if value is null) |
+  | `NOT_EXISTS` | `true` iff the field is absent |
+  | value comparison where the field is **null** | `false` (null is distinct from missing; both are non-matching for value ops) |
+  | type mismatch (e.g. `GT` on a non-numeric value) | `false`, and recorded in the decision trace |
+  So a user writing a negative condition does NOT have to manually pair it with `exists`.
+- **Typed field references, not a free JSONPath string** (prevents a JSONPath mini-language leaking into
+  the product). Two field kinds over the normalized `AlertReceivedEvent`:
+  - `SYSTEM` (`name` in: `routingKey`, `source`, `messageType`, `severity`, `externalEntityId`,
+    `title`, `description`)
+  - `METADATA` (`key` = an arbitrary key from the event `metadata` map)
+- **Operator set** (string-typed unless noted): `EQUALS`, `NOT_EQUALS`, `IN`, `NOT_IN`,
+  `CONTAINS_SUBSTRING`, `NOT_CONTAINS_SUBSTRING`, `STARTS_WITH`, `ENDS_WITH`, `EXISTS`, `NOT_EXISTS`,
+  `MATCHES_REGEX`, `NOT_MATCHES_REGEX`, and numeric `GT` / `GTE` / `LT` / `LTE` (value coerced to a
+  number; mismatch -> `false` + trace). `IN`/`NOT_IN` take a list value. `messageType` and `severity`
+  match against the `common-domain` enums.
+- **Regex uses RE2J** (`com.google.re2j`, linear-time, no catastrophic backtracking / ReDoS), NOT
+  `java.util.regex`. Patterns are compiled and size/complexity-limited **at save time**, never compiled
+  per-event on the hot path.
+- **Time-of-day conditions**: a rule may carry an optional time restriction (day-of-week + local time
+  window), evaluated in the **organization's timezone** at decision time (IANA zone, DST-aware,
+  midnight-spanning windows allowed). Reuses the timezone discipline proven in `schedule-service`.
+- **Authoring vs evaluation are separate concerns.** *Authoring* — rule CRUD, validation, preview,
+  authoritative storage — is **always service-catalog's job**; incident-service never authors, validates,
+  or owns rules. *Evaluation* — "run this event against the rules, pick the target" — is a pure
+  computation whose *location* depends on the ticket. So the `routing-core` evaluator starts as a
+  **module inside service-catalog-service** (T1: catalog is the only evaluator). It is **extracted to a
+  shared lib `libs/routing-core` only in T2**, when incident-service must evaluate the replicated ruleset
+  locally — and then ONLY the pure condition-model types + tree evaluator are shared (no Spring/JPA, no
+  CRUD/validation/storage, which stay catalog-only). It is shared then purely so incident's local
+  evaluation is byte-identical to catalog's preview (a second, drifting implementation would make
+  preview disagree with production routing). No shared lib before that second consumer exists.
+- **Consistency over availability for the routing decision.** During a catalog outage T1 fails safe to
+  DLT (delayed-but-correct + durable via Kafka/outbox), never a guessed misroute — a misrouted real
+  incident is exactly the silent paging black hole Phase 10 was built to kill. T2 dissolves the
+  trade-off entirely by replicating the ruleset and evaluating locally (see T2).
+- **Explainability**: every routing decision stamps `matched_rule_id` + `ruleset_version` on the
+  incident and emits a `ROUTED` timeline detail; the human-readable timeline line stays short
+  ("Routed to Payments via rule 'Production payment alerts' (ruleset v12)"); the full per-predicate
+  trace is returned only by the dry-run preview endpoint, so the production timeline does not bloat.
+
+### Ticket breakdown
+
+- **T1 - Engine + control plane in service-catalog (incident-service unchanged, sync, consistency-first).**
+  - New `routing` module/package **inside service-catalog-service** (NOT a shared lib yet — catalog is the
+    only consumer in T1): condition-model types (`ConditionNode` = `Group{op: ALL|ANY|NOT, children}`
+    or `Leaf{field, operator, value}`; `FieldRef{kind: SYSTEM|METADATA, name/key}`; `Operator` enum;
+    `RoutingAction{type: ROUTE|UNROUTED, serviceId, escalationPolicyId}`; `Ruleset{version, rules[],
+    fallbackAction}`; `RoutingContext` = the matchable projection of `AlertReceivedEvent`), the
+    `RoutingPredicateEvaluator` interface + a `TreeRoutingEvaluator` (first-match, the missing/null/type
+    table above, RE2J for regex, org-timezone time restrictions), and a `RoutingDecision{serviceId,
+    escalationPolicyId, matchedRuleId, rulesetVersion, unrouted, trace}` result with an optional
+    per-predicate trace (off on the hot path, on for preview). Keep these types Spring/JPA-free from the
+    start so the T2 extraction to `libs/routing-core` is a move, not a rewrite.
+  - service-catalog persistence (Flyway `V4__routing_rules.sql`): `routing_ruleset` (PK `organization_id`,
+    `version` bigint monotonic, `published_at`, `fallback_service_id` nullable, `fallback_policy_id`
+    nullable — null fallback = `UNROUTED`); `routing_rule` (`id`, `organization_id`, `position` int,
+    `name`, `enabled` bool, `condition_json` jsonb, `action_type`, `action_service_id`,
+    `action_policy_id`, `created_at`). Any rule insert/update/delete/reorder **bumps**
+    `routing_ruleset.version` for that org (so T2's snapshot events carry a monotonic version).
+  - Rule CRUD (member-gated, on the gateway): `POST/GET/PUT/DELETE
+    /v1/organizations/{orgId}/routing-rules`, plus `PUT .../routing-rules/order` (reorder) and
+    `PUT/GET/DELETE .../routing-rules/fallback`. Referenced `serviceId`/`escalationPolicyId` validated
+    (service in org; policy via the existing `EscalationClient`, unknown/foreign -> 409). Condition JSON
+    validated at save (known field refs, operator/value type agreement, RE2J pattern compiles within
+    limits) -> 400 on invalid. Shadowing warning (non-fatal): if an unconditional / always-true rule
+    precedes others, flag the later ones as unreachable in the response.
+  - Internal resolve becomes context-aware: replace `GET /v1/internal/.../routing?routingKey=` with
+    `POST /v1/internal/organizations/{orgId}/routing/resolve` taking the full `RoutingContext` body,
+    returning `RoutingDecision`. Still a service-token-gated internal endpoint (Phase 16 T3,
+    `catalog.routing.resolve` scope). incident-service's `CatalogClient.resolve` is widened to send the
+    context (built from the `AlertReceivedEvent` it already holds); everything downstream
+    (`RoutingAvailabilityResolver`, `unrouted`, `routed_from_cache`) stays.
+  - **Outage behavior (T1, consistency-first):** because routing is now a function of multiple event
+    fields, the Phase 10 T4 `routing_cache` keyed by `routingKey` alone is **unsafe** (a different-field
+    event would get a misrouted last-known route). So in T1 the cache fallback is **not** used for rule
+    decisions: a catalog outage re-throws `RoutingUnavailableException` -> retry -> DLT (no orphan, no
+    misroute). This is a deliberate, documented availability regression vs Phase 10 T4, restored
+    correctly in T2. (The `routing_cache` table/code is left dormant, removed or repurposed in T2.)
+  - Dry-run preview: `POST /v1/organizations/{orgId}/routing-rules/preview` with a sample event ->
+    `RoutingDecision` **including the full trace** (which rule matched, and for each earlier rule why it
+    did not), without creating an incident.
+  - Migration of current behavior (in `V4` or a one-off): generate one `EQUALS routingKey -> {service,
+    policy}` rule per `monitored_service` that has a `routing_key`; set `fallbackAction` from the
+    existing `org_routing_default`. Existing `routing_key` column + `org_routing_default` stay
+    (deprecated) so nothing breaks; the engine becomes the single resolution path.
+  - incident-service: stamp `matched_rule_id` + `ruleset_version` on the incident (Flyway add columns),
+    emit the `ROUTED` timeline detail, add a `routing_rule_matched_total{ruleId}` counter. UNROUTED /
+    `routed_from_cache` behavior otherwise unchanged.
+  - Acceptance: a CRITICAL-from-grafana and a WARNING with the **same** routingKey route to different
+    policies; reordering rules changes the outcome (first match wins); no rule matches + fallback set ->
+    fallback; none + no fallback -> UNROUTED (Phase 10 T3, unchanged); a time-restricted rule matches
+    only inside its org-timezone window (incl. a DST and a midnight-spanning case); preview returns the
+    matched rule + trace without an incident; a catalog outage -> DLT, no orphan, no misroute; the
+    migrated flat mappings reproduce pre-Phase-17 routing.
+
+- **T2 - Local ruleset read-model in incident-service (catalog off the hot path; consistency AND
+  availability).** Routing is `f(event, ruleset)`; the event is already local, so replicate the only
+  remote input — the ruleset — and the catalog hot-path call disappears entirely.
+  - service-catalog publishes the **full ruleset as a versioned snapshot** on every change:
+    `routing.ruleset-published.v1`, key = `organization_id`, value = `{rulesetVersion, rules[],
+    fallbackAction}` (a full snapshot, NOT a delta). Published via `common-outbox` (Phase 9) in the same
+    transaction as the rule write -> never-lost / never-ghost. Snapshots make duplicate delivery
+    harmless, out-of-order delivery resolvable, and a poisoned older version in the DLT a non-issue (a
+    newer snapshot logically supersedes it — the DLT stops being a time bomb).
+  - incident-service consumes it into a PG read-model (Flyway `V8`): `routing_ruleset_projection`
+    (PK `organization_id`, `version` bigint, `payload_json` jsonb, `observed_at`, `state`). Upsert is
+    **version-gated**: write only if `incoming_version > stored_version` (idempotent, out-of-order-safe).
+    Persisting in incident-service's **own** PG (not catalog's — database-per-service holds) means a
+    restart / scale-up / redeploy inherits populated state from the shared incident DB — **process-level
+    cold start is gone**; only genuine first-population (empty system / new tenant / DB restore) needs
+    hydration.
+  - **Extract the T1 catalog `routing` module to a shared lib `libs/routing-core`** (pure condition-model
+    types + `RoutingPredicateEvaluator`/`TreeRoutingEvaluator` only; CRUD/validation/storage stay in
+    catalog). catalog and incident now both depend on it, so incident's local eval is byte-identical to
+    catalog's preview. (Snapshot payload types may instead live in `common-events` since they cross the
+    wire — decide at implementation; the point is one shared definition, no second evaluator.)
+  - Hot-path resolution flips to **local evaluation** via `routing-core` against the projection — no
+    per-event catalog call. A catalog outage no longer affects routing (only delays the *next* ruleset
+    version). This generalizes the Phase 10 T4 `routing_cache` (a catalog-derived read-model already
+    living in incident-service's PG) from "last route per key" to "the durable projection of the ruleset
+    that produces the route" — and the Phase 10 T4 outage cache + the T1 DLT-on-outage behavior are
+    both superseded and removed.
+  - **Cold-miss lazy hydration**: if the projection for an org is absent on the hot path (UNINITIALIZED),
+    do a one-time **synchronous pull** from catalog's resolve/snapshot API (never catalog DB, off the
+    steady-state path), populate, then serve — self-healing without a readiness gate. If catalog is also
+    down at that moment, fall to `UNROUTED` fallback (still visible/counted, never a misroute).
+  - **Reconciliation / repair pull** (`@Scheduled`, low frequency, mirrors the Phase 10 T4
+    `RoutingReconciliationJob`): catches missing snapshots, excessively stale projections, DB-restore
+    gaps, and new tenants. Via catalog API, off the hot path; a snapshot/event race is resolved by the
+    same version gate. (Catalog boot-publish is an optimization, NOT the correctness mechanism — this
+    pull is.)
+  - **Projection state is explicit and distinct** (so ops is not blind): `READY(version)` /
+    `ABSENT_CONFIRMED` (org genuinely has no rules -> fallback) / `UNINITIALIZED` (not yet hydrated) /
+    `STALE` (age beyond the freshness policy). These must NOT collapse into one `UNROUTED` metric.
+  - **Freshness policy (explicit)**: define a max acceptable projection age; export an event-lag metric
+    and `ruleset_version` + `observed_at`; behavior on excessive staleness = **keep routing on the
+    last-known ruleset** (config is slow-changing; last-known is almost certainly still correct) **plus**
+    raise a staleness alert — never fall back or drop solely due to staleness. Every routing decision
+    records the `ruleset_version` it used.
+  - Delivery guarantee: idempotent, **versioned at-least-once** (source outbox + version-gated upsert);
+    do not chase exactly-once. incident-service advances the Kafka offset only after the DB upsert
+    commits.
+  - Acceptance: rule change in catalog -> snapshot event -> incident projection updated (version-gated;
+    a replayed/older snapshot is a no-op); **catalog down -> routing still works** off the projection
+    (only new versions delayed); restart/scale-up of incident-service inherits the projection (no
+    cold-start gap, no re-pull); a cold/empty projection lazily hydrates from catalog then serves;
+    reconciliation repairs a deliberately-missed snapshot; the projection state + freshness metrics are
+    observable; every incident records the `ruleset_version` used.
+
+- **T3 (deferred, spec later)** - control-plane niceties surfaced in research but out of T1/T2 scope:
+  draft vs published rulesets (Save != change prod routing; Publish does), richer shadow/overlap
+  analysis in the UI, and the optional CEL "advanced expression mode" behind the existing
+  `RoutingPredicateEvaluator` seam.
+
+### Research notes (researched 2026-06-24)
+
+Method: four parallel web-research passes over official docs — PagerDuty (Event Orchestration / PCL /
+legacy Rulesets), Opsgenie + Grafana OnCall/IRM, Datadog On-Call + Splunk On-Call/VictorOps +
+incident.io, and JVM rule-engine / expression-language design patterns. Captured as a decision record:
+
+- **Q: First-match-wins or all-matching-rules-apply?**
+  Decision: **first-match-wins** for the terminal routing decision; fan-out is a separate future layer.
+  Evidence: PagerDuty Router "routes to the Service based on the first rule that matches" + required
+  `catch_all`; Opsgenie "the first matching routing rule is applied", one rule applies; Datadog On-Call
+  rules "evaluated top to bottom", last rule a mandatory fallback; Grafana "first matching route".
+  Rejected: merge-all-matching (Datadog *monitor notification rules* merge+dedupe recipients; PagerDuty
+  rule "continue") — that is notification fan-out, not a routing decision.
+- **Q: Catch-all as a normal rule, or a separate construct?**
+  Decision: a separate `fallbackAction`, not an entry in the rule list (pinned in UI only).
+  Evidence: PagerDuty `catch_all` is a distinct block, not a rule; Opsgenie default `match-all` rule is
+  flagged `is_default`; Grafana `is_the_last_route`. A separate construct makes the ruleset total and
+  keeps the DB invariant clean. Rejected: "empty-condition rule pinned last" (conflates system fallback
+  with a normal rule).
+- **Q: Expression language (CEL/SpEL/...) or a structured condition model?**
+  Decision: **structured typed condition tree** now; CEL behind an interface as a later escape hatch.
+  Evidence: the UI-authored norm is a structured field/operator/value tree persisted as JSON
+  (json-rules-engine; react-querybuilder, which can even export to CEL); Martin Fowler's RulesEngine
+  bliki cautions that rules-engine flow becomes "very hard to maintain" and recommends a narrow
+  domain-specific engine. CEL (cel.dev, google/cel-java) is genuinely safe (non-Turing-complete,
+  terminating, side-effect-free, host-data-only, statically type-checked) and the right *future*
+  expression layer, but a tree interpreter gives easier explainability and avoids a second semantic
+  layer. Rejected for untrusted input: **SpEL `StandardEvaluationContext`** (T()-operator RCE class;
+  cf. CVE-2026-22738, SpEL injection via a user-controlled filter key in Spring AI `SimpleVectorStore`),
+  **MVEL** and **Janino** (full Java/JRE access; rely on the deprecated SecurityManager).
+- **Q: How to match payload fields — free path string or typed refs?**
+  Decision: typed `SYSTEM` / `METADATA` field refs. Evidence/Rejected: PagerDuty PCL uses dotted paths
+  (`event.custom_details.*`) which is effectively a path mini-language; we keep the grammar finite to
+  stay UI-buildable and validatable.
+- **Q: Negative-operator semantics on missing fields?**
+  Decision: a negative leaf matches only when the field is **present** and the condition fails; absence
+  needs `NOT_EXISTS`. Evidence: PagerDuty documents the opposite as a gotcha ("does not match" also
+  matches events missing the field) and tells users to add an `exists` check — we design the gotcha out
+  instead. Also split the vague `contains` into `CONTAINS_SUBSTRING` vs `CONTAINS_ELEMENT`.
+- **Q: Regex engine?**
+  Decision: **RE2J**, compiled at save time with limits. Evidence: PagerDuty/Opsgenie use RE2 (linear,
+  no catastrophic backtracking); Opsgenie even imposes a regex timeout. Rejected: `java.util.regex`
+  (backtracking -> ReDoS on user-authored patterns).
+- **Q: Hot-path — call catalog per event, or evaluate against a local read-model?**
+  Decision: **local read-model** (T2 end-state); per-event sync is a T1 interim scaffold only.
+  Evidence/reasoning: routing config is read-mostly and slow-changing, so seconds of propagation
+  staleness is negligible, whereas "page someone even when catalog is down" is the product's core
+  promise — the asymmetry favors replicate-and-read-locally (a versioned, durable, reconciled read-model
+  is a legitimate read-side, distinct from "cache as source of truth"). Reuses existing infra:
+  `common-outbox` (versioned full-snapshot publish), idempotent version-gated consumer, a PG read-model
+  (the Phase 10 T4 `routing_cache` is the same pattern in miniature), and a reconciliation pull.
+- **Q: Cold start of the local read-model?**
+  Decision: PG-persisted projection eliminates *process-level* cold start (restart/scale-up inherit
+  state); residual genuine first-population handled by cold-miss lazy sync-pull + the reconciliation
+  pull; distinct projection states (`READY`/`ABSENT_CONFIRMED`/`UNINITIALIZED`/`STALE`) keep ops from
+  conflating "no rules" with "not yet loaded".
+- **Q: Isn't a shared `routing-core` lib the "shared business logic across microservices" anti-pattern?**
+  Decision: No — what is shared is a pure **policy-evaluation engine** + the **rules as versioned data**,
+  not two services' domain logic. The anti-pattern is two bounded contexts sharing each other's business
+  logic; here routing is one context's concept, the rules stay single-owned by catalog (shipped as data,
+  not code), and incident only *executes* the engine locally on routing's behalf. The shared surface is a
+  small, stable, I/O-free pure function `(event, ruleset) -> decision` — closer to a regex/CEL library
+  than to domain logic. Evidence: this is the mainstream pattern for slow-changing policy evaluated on a
+  hot path — **OPA** (central policies, local eval via lib/sidecar), **feature-flag SDKs** (LaunchDarkly /
+  Unleash / OpenFeature: central flag rules, client-side eval from a synced ruleset), **Envoy/Istio xDS**
+  (central routing config pushed to sidecars that evaluate locally). It is also *entailed*, not stylistic:
+  a per-event decision needs both the event (only in incident) and the rules, so taking catalog off the
+  hot path forces local eval, which forces a single shared evaluator to avoid catalog-preview-vs-incident
+  drift. Guardrails that keep us on the right side: the lib stays **pure engine only** (CRUD / validation
+  / storage never leave catalog), rules are **always data**, and the monorepo removes cross-repo version
+  skew. Rejected alternatives: per-event sync call (T1 — no sharing but catalog on the hot path) and an
+  eval sidecar (the OPA deployment shape — same local-eval semantics, heavier ops).
+
+Sources: PagerDuty — support.pagerduty.com/main/docs/event-orchestration,
+/event-orchestration-examples, /pd-cef, /rulesets; developer.pagerduty.com/docs/pcl-overview; the
+official PagerDuty Terraform provider schemas. Opsgenie — docs.opsgenie.com/docs/team-routing-rule-api,
+/alert-and-notification-policy-api; support.atlassian.com/opsgenie/docs/alert-notifications-flow,
+/action-filters-in-opsgenie-integrations. Grafana —
+grafana.com/docs/grafana-cloud/alerting-and-irm/irm/configure/escalation-routing/alert-routing,
+grafana.com/docs/oncall/latest/oncall-api-reference/routes. Datadog —
+docs.datadoghq.com/incident_response/on-call/routing_rules, /monitors/notify/notification_rules.
+Splunk On-Call — help.splunk.com/.../splunk-on-call/alerts/routing-keys, /rules-engine. incident.io —
+docs.incident.io/alerts/escalations-from-alerts, /attributes-and-priorities. Patterns/EL —
+martinfowler.com/bliki/RulesEngine.html, cel.dev, github.com/google/cel-java,
+github.com/CacheControl/json-rules-engine, react-querybuilder.js.org/docs/utils/export,
+spring.io/security/cve-2026-22738.
+
 ## 10. Suggested Repository Structure
 
 ```text
