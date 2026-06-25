@@ -1,6 +1,6 @@
 package com.urunsiyabend.heimcall.incident;
 
-import com.urunsiyabend.heimcall.common.events.AlertReceivedEvent;
+import com.urunsiyabend.heimcall.common.events.RoutingRulesetSnapshotEvent;
 import com.urunsiyabend.heimcall.common.security.ServiceTokenClients;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -70,15 +70,30 @@ public class CatalogClient {
     public record Routing(UUID serviceId, UUID escalationPolicyId, UUID ownerTeamId) {
     }
 
-    /** Resolve a full alert against the org's routing ruleset. Never returns null. */
-    public RoutingResult resolve(UUID organizationId, AlertReceivedEvent event) {
-        RoutingContext ctx = new RoutingContext(
-                event.routingKey(), event.source(),
-                event.messageType() == null ? null : event.messageType().name(),
-                event.severity() == null ? null : event.severity().name(),
-                event.externalEntityId(), event.title(), event.description(),
-                event.metadata(), event.occurredAt());
-        return resolve(organizationId, ctx);
+    /**
+     * Pull the full current ruleset snapshot for an org (Phase 17 T2) — used to lazily hydrate or
+     * reconcile the local read-model, NOT on the steady-state hot path (that evaluates locally).
+     *
+     * @throws RoutingUnavailableException catalog is unreachable; the caller falls back to UNROUTED
+     *                                     (cold miss) or simply retries next cycle (reconciliation).
+     */
+    public RoutingRulesetSnapshotEvent fetchRuleset(UUID organizationId) {
+        try {
+            RoutingRulesetSnapshotEvent snapshot = restClient.get()
+                    .uri("/v1/internal/organizations/{org}/routing/ruleset", organizationId)
+                    .retrieve()
+                    .body(RoutingRulesetSnapshotEvent.class);
+            if (snapshot == null) {
+                throw new RoutingUnavailableException(null, new IllegalStateException("empty ruleset snapshot"));
+            }
+            return snapshot;
+        } catch (RuntimeException e) {
+            if (e instanceof RoutingUnavailableException rue) {
+                throw rue;
+            }
+            log.warn("Ruleset pull UNAVAILABLE for org={}: {}", organizationId, e.getMessage());
+            throw new RoutingUnavailableException(null, e);
+        }
     }
 
     public RoutingResult resolve(UUID organizationId, RoutingContext context) {

@@ -1,5 +1,7 @@
 package com.urunsiyabend.heimcall.incident;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.urunsiyabend.heimcall.common.events.RoutingRulesetSnapshotEvent;
 import org.apache.kafka.clients.consumer.ConsumerConfig;
 import org.apache.kafka.common.serialization.ByteArraySerializer;
 import org.apache.kafka.common.serialization.StringDeserializer;
@@ -104,6 +106,37 @@ public class KafkaConfig {
         ConcurrentKafkaListenerContainerFactory<String, Object> factory =
                 new ConcurrentKafkaListenerContainerFactory<>();
         factory.setConsumerFactory(notificationConsumerFactory);
+        factory.setCommonErrorHandler(errorHandler);
+        return factory;
+    }
+
+    // Phase 17 T2: consume the routing ruleset snapshot stream into the local read-model. One concrete
+    // type on this topic, so the deserializer is pinned to RoutingRulesetSnapshotEvent (no type header
+    // needed) and uses Boot's ObjectMapper so the polymorphic condition tree + java.time round-trip.
+    @Bean
+    public ConsumerFactory<String, RoutingRulesetSnapshotEvent> rulesetSnapshotConsumerFactory(
+            KafkaProperties properties,
+            org.springframework.beans.factory.ObjectProvider<ObjectMapper> objectMapperProvider) {
+        // Fall back to a jsr310-aware mapper when no Boot ObjectMapper is present (sliced test contexts).
+        ObjectMapper mapper = objectMapperProvider.getIfAvailable(
+                () -> new ObjectMapper().findAndRegisterModules());
+        Map<String, Object> props = properties.buildConsumerProperties(null);
+        props.put(ConsumerConfig.GROUP_ID_CONFIG, "incident-service.routing-snapshot-consumer");
+        props.keySet().removeIf(k -> k.startsWith("spring.json.") || k.startsWith("spring.deserializer."));
+        JsonDeserializer<RoutingRulesetSnapshotEvent> delegate =
+                new JsonDeserializer<>(RoutingRulesetSnapshotEvent.class, mapper, false);
+        ErrorHandlingDeserializer<RoutingRulesetSnapshotEvent> value = new ErrorHandlingDeserializer<>(delegate);
+        return new DefaultKafkaConsumerFactory<>(props, new StringDeserializer(), value);
+    }
+
+    @Bean
+    public ConcurrentKafkaListenerContainerFactory<String, RoutingRulesetSnapshotEvent>
+            rulesetSnapshotListenerContainerFactory(
+                    ConsumerFactory<String, RoutingRulesetSnapshotEvent> rulesetSnapshotConsumerFactory,
+                    DefaultErrorHandler errorHandler) {
+        ConcurrentKafkaListenerContainerFactory<String, RoutingRulesetSnapshotEvent> factory =
+                new ConcurrentKafkaListenerContainerFactory<>();
+        factory.setConsumerFactory(rulesetSnapshotConsumerFactory);
         factory.setCommonErrorHandler(errorHandler);
         return factory;
     }

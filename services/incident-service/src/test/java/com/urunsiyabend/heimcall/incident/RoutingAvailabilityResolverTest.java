@@ -3,80 +3,123 @@ package com.urunsiyabend.heimcall.incident;
 import com.urunsiyabend.heimcall.common.domain.MessageType;
 import com.urunsiyabend.heimcall.common.domain.Severity;
 import com.urunsiyabend.heimcall.common.events.AlertReceivedEvent;
-import com.urunsiyabend.heimcall.incident.CatalogClient.RoutingResult;
+import com.urunsiyabend.heimcall.common.events.RoutingRulesetSnapshotEvent;
+import com.urunsiyabend.heimcall.incident.RoutingProjectionStore.Loaded;
+import com.urunsiyabend.heimcall.incident.domain.ProjectionState;
+import com.urunsiyabend.heimcall.routing.ConditionNode;
+import com.urunsiyabend.heimcall.routing.FieldRef;
+import com.urunsiyabend.heimcall.routing.Operator;
+import com.urunsiyabend.heimcall.routing.Rule;
+import com.urunsiyabend.heimcall.routing.RoutingAction;
+import com.urunsiyabend.heimcall.routing.Ruleset;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
-import org.mockito.InjectMocks;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
 import java.time.Instant;
+import java.time.ZoneId;
+import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 /**
- * Phase 17 T1: the {@link RoutingAvailabilityResolver} is now a thin, cache-free wrapper over
- * {@link CatalogClient}. A successful resolve is either ROUTED or a deliberate UNROUTED; a catalog
- * OUTAGE propagates as {@link RoutingUnavailableException} (retry/DLT, no misroute) — the documented
- * T1 availability regression vs Phase 10 T4, restored correctly by the T2 local projection.
+ * Phase 17 T2: the resolver now evaluates the locally replicated ruleset (catalog off the hot path).
+ * Verifies the projection states drive the right behavior — READY/STALE route locally, a cold miss
+ * lazily hydrates, and a cold miss with catalog also down falls to a deliberate UNROUTED (never a
+ * misroute). The real {@code TreeRoutingEvaluator} runs inside the resolver, so these also prove the
+ * decision is produced from the replicated ruleset.
  */
 @ExtendWith(MockitoExtension.class)
 class RoutingAvailabilityResolverTest {
 
     private static final UUID ORG = UUID.randomUUID();
+    private static final UUID SVC = UUID.randomUUID();
+    private static final UUID POLICY = UUID.randomUUID();
 
     @Mock
+    RoutingProjectionStore store;
+    @Mock
     CatalogClient catalog;
-    @InjectMocks
-    RoutingAvailabilityResolver resolver;
+
+    private final SimpleMeterRegistry registry = new SimpleMeterRegistry();
+
+    private RoutingAvailabilityResolver resolver() {
+        return new RoutingAvailabilityResolver(store, catalog, registry);
+    }
 
     private AlertReceivedEvent event() {
         return new AlertReceivedEvent(UUID.randomUUID(), Instant.now(), ORG, UUID.randomUUID(),
-                "backend-critical", "grafana", MessageType.CRITICAL, "ext-1", "dedup",
+                "payments", "grafana", MessageType.CRITICAL, "ext-1", "dedup",
                 "Payment API 5xx", "error rate high", Severity.CRITICAL, Map.of());
     }
 
-    @Test
-    void routedDecisionPassesThrough() {
-        UUID svc = UUID.randomUUID();
-        UUID policy = UUID.randomUUID();
-        UUID rule = UUID.randomUUID();
-        when(catalog.resolve(eq(ORG), any(AlertReceivedEvent.class)))
-                .thenReturn(new RoutingResult(svc, policy, rule, 4L, false));
-
-        RoutingDecision decision = resolver.resolve(event());
-
-        assertThat(decision.unrouted()).isFalse();
-        assertThat(decision.fromCache()).isFalse();
-        assertThat(decision.serviceId()).isEqualTo(svc);
-        assertThat(decision.policyId()).isEqualTo(policy);
-        assertThat(decision.matchedRuleId()).isEqualTo(rule);
-        assertThat(decision.rulesetVersion()).isEqualTo(4L);
+    private Ruleset rulesetMatchingPayments(long version) {
+        Rule rule = new Rule(UUID.randomUUID(), "payments", true,
+                new ConditionNode.Leaf(FieldRef.system("routingKey"), Operator.EQUALS, List.of("payments")),
+                RoutingAction.route(SVC, POLICY), null);
+        return new Ruleset(version, ZoneId.of("UTC"), List.of(rule), RoutingAction.unrouted());
     }
 
     @Test
-    void unroutedDecisionPassesThrough() {
-        when(catalog.resolve(eq(ORG), any(AlertReceivedEvent.class)))
-                .thenReturn(new RoutingResult(null, null, null, 4L, true));
+    void readyProjectionRoutesLocally() {
+        when(store.load(eq(ORG), any(Instant.class)))
+                .thenReturn(Optional.of(new Loaded(rulesetMatchingPayments(5), 5, ProjectionState.READY, Instant.now())));
 
-        RoutingDecision decision = resolver.resolve(event());
+        RoutingDecision d = resolver().resolve(event());
 
-        assertThat(decision.unrouted()).isTrue();
-        assertThat(decision.policyId()).isNull();
+        assertThat(d.unrouted()).isFalse();
+        assertThat(d.policyId()).isEqualTo(POLICY);
+        assertThat(d.serviceId()).isEqualTo(SVC);
+        assertThat(d.rulesetVersion()).isEqualTo(5);
+        verify(catalog, never()).fetchRuleset(any());
     }
 
     @Test
-    void outageRethrowsForRetryDlt() {
-        when(catalog.resolve(eq(ORG), any(AlertReceivedEvent.class)))
-                .thenThrow(new RoutingUnavailableException("backend-critical", new RuntimeException("down")));
+    void coldMissHydratesFromCatalogThenRoutes() {
+        when(store.load(eq(ORG), any(Instant.class))).thenReturn(Optional.empty());
+        RoutingRulesetSnapshotEvent snapshot = new RoutingRulesetSnapshotEvent(
+                UUID.randomUUID(), ORG, 5, rulesetMatchingPayments(5), Instant.now());
+        when(catalog.fetchRuleset(ORG)).thenReturn(snapshot);
 
-        assertThatThrownBy(() -> resolver.resolve(event()))
-                .isInstanceOf(RoutingUnavailableException.class);
+        RoutingDecision d = resolver().resolve(event());
+
+        assertThat(d.policyId()).isEqualTo(POLICY);
+        verify(store).apply(eq(snapshot), any(Instant.class));
+    }
+
+    @Test
+    void coldMissWithCatalogDownFallsToUnrouted() {
+        when(store.load(eq(ORG), any(Instant.class))).thenReturn(Optional.empty());
+        when(catalog.fetchRuleset(ORG))
+                .thenThrow(new RoutingUnavailableException(null, new RuntimeException("down")));
+
+        RoutingDecision d = resolver().resolve(event());
+
+        assertThat(d.unrouted()).isTrue();
+        assertThat(d.policyId()).isNull();
+        assertThat(d.rulesetVersion()).isEqualTo(0);
+    }
+
+    @Test
+    void staleProjectionStillRoutesOnLastKnown() {
+        when(store.load(eq(ORG), any(Instant.class)))
+                .thenReturn(Optional.of(new Loaded(rulesetMatchingPayments(5), 5, ProjectionState.STALE,
+                        Instant.now().minusSeconds(7200))));
+
+        RoutingDecision d = resolver().resolve(event());
+
+        assertThat(d.unrouted()).isFalse();
+        assertThat(d.policyId()).isEqualTo(POLICY);
+        verify(catalog, never()).fetchRuleset(any());
     }
 }

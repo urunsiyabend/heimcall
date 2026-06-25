@@ -1,9 +1,11 @@
 package com.urunsiyabend.heimcall.catalog.web;
 
 import com.urunsiyabend.heimcall.catalog.RoutingRuleService;
+import com.urunsiyabend.heimcall.common.events.RoutingRulesetSnapshotEvent;
 import com.urunsiyabend.heimcall.routing.RoutingContext;
 import com.urunsiyabend.heimcall.routing.RoutingDecision;
 import org.springframework.security.access.prepost.PreAuthorize;
+import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
@@ -37,5 +39,17 @@ public class InternalController {
     @PreAuthorize("hasAuthority('SCOPE_catalog.routing.resolve')")
     public RoutingDecision resolve(@PathVariable UUID orgId, @RequestBody RoutingContext context) {
         return routing.resolve(orgId, context);
+    }
+
+    /**
+     * Full current ruleset snapshot for an org (Phase 17 T2). incident-service pulls this to lazily
+     * hydrate or reconcile its local read-model when the snapshot stream has not (yet) populated it.
+     * Always returns a snapshot (the ruleset is total; an org with no rules yields version 0 + an empty,
+     * UNROUTED-fallback ruleset). Same service-token scope as resolve.
+     */
+    @GetMapping("/organizations/{orgId}/routing/ruleset")
+    @PreAuthorize("hasAuthority('SCOPE_catalog.routing.resolve')")
+    public RoutingRulesetSnapshotEvent ruleset(@PathVariable UUID orgId) {
+        return routing.snapshot(orgId);
     }
 }

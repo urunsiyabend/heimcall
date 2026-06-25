@@ -16,6 +16,8 @@ dependencies {
     runtimeOnly 'org.postgresql:postgresql'
 
     implementation project(':libs:common-events')
+    // Phase 17 T2: evaluate the replicated ruleset locally with the shared engine (same as catalog).
+    implementation project(':libs:routing-core')
 
     testImplementation project(':libs:test-support')
     testImplementation 'org.springframework.kafka:spring-kafka-test'

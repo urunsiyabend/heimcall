@@ -21,8 +21,15 @@ import java.util.UUID;
 record RoutingDecision(UUID serviceId, UUID policyId, UUID matchedRuleId, long rulesetVersion,
                        boolean unrouted, boolean fromCache) {
 
-    static RoutingDecision of(CatalogClient.RoutingResult r) {
-        return new RoutingDecision(r.serviceId(), r.escalationPolicyId(), r.matchedRuleId(),
-                r.rulesetVersion(), r.unrouted(), false);
+    /** Map a routing-core decision (from local evaluation, Phase 17 T2) onto the incident shape. */
+    static RoutingDecision fromCore(com.urunsiyabend.heimcall.routing.RoutingDecision d) {
+        return new RoutingDecision(d.serviceId(), d.escalationPolicyId(), d.matchedRuleId(),
+                d.rulesetVersion(), d.unrouted(), false);
+    }
+
+    /** Deliberate UNROUTED when the projection is cold and catalog is also unavailable — visible and
+     *  counted, never a misroute. {@code rulesetVersion} 0 signals "no ruleset was applied". */
+    static RoutingDecision unroutedFallback() {
+        return new RoutingDecision(null, null, null, 0L, true, false);
     }
 }

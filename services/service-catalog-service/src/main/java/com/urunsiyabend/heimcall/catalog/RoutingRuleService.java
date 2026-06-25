@@ -191,6 +191,16 @@ public class RoutingRuleService {
         return evaluator.evaluate(context, assemble(orgId), true);
     }
 
+    /** Full snapshot for the pull-based hydration/reconciliation path (Phase 17 T2). Mirrors what the
+     *  outbox publishes on a write, so a pull and a stream deliver the same versioned payload. */
+    public com.urunsiyabend.heimcall.common.events.RoutingRulesetSnapshotEvent snapshot(UUID orgId) {
+        RoutingRuleset header = header(orgId);
+        Ruleset ruleset = assemble(orgId);
+        Instant publishedAt = header == null ? Instant.now() : header.getPublishedAt();
+        return new com.urunsiyabend.heimcall.common.events.RoutingRulesetSnapshotEvent(
+                UUID.randomUUID(), orgId, ruleset.version(), ruleset, publishedAt);
+    }
+
     /** Build the evaluable ruleset from storage. Absent header => empty, UTC, UNROUTED fallback. */
     public Ruleset assemble(UUID orgId) {
         RoutingRuleset header = header(orgId);
