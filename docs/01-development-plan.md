@@ -1950,6 +1950,113 @@ martinfowler.com/bliki/RulesEngine.html, cel.dev, github.com/google/cel-java,
 github.com/CacheControl/json-rules-engine, react-querybuilder.js.org/docs/utils/export,
 spring.io/security/cve-2026-22738.
 
+## Phase 18 - Throughput & Consumer Resilience under Load (measured 2026-06-25)
+
+Goal: the first real load test of the alert→incident→escalation→notification path exposed three
+capacity ceilings and one latent correctness bug. Close them, and commit a repeatable load-test
+harness (none existed before). This phase is **measurement-led**: every ticket cites a number from
+the 2026-06-25 run and must move it.
+
+### Measured baseline (local fleet, 8 bootJars, CPU governor=performance, 20 integration keys, k6 ramping-arrival-rate)
+
+| Observation | Number | Where it binds |
+| --- | --- | --- |
+| Ingest accept ceiling | ~676 req/s; p95 4.27s at 3000 offered RPS | gateway→integration→sync identity resolve→DB outbox write→202 |
+| Event-chain throughput | ~100 msg/s **per service** | `OutboxRelay` poll(1000ms) × batch(100) |
+| notification delivery | **0 delivered**, consumer stuck at offset 12, 28,942 frozen | poison message + single partition + failed DLT |
+| Partitions | every topic `PartitionCount=1` | no consumer parallelism anywhere |
+| Rate limiter | 5 rps × 20 keys = 100 rps hard cap (run 1: 81% 429) | gateway Redis token bucket (by design; default low) |
+
+### Design decisions (locked 2026-06-25, research-driven — see Research notes below)
+
+- **T1 first lever is polling tuning, not CDC.** Lower `heimcall.outbox.poll-interval-ms` and raise
+  `batch-size`; the relay already uses `FOR UPDATE SKIP LOCKED` so multiple instances parallelize
+  safely. CDC/Debezium (push-based, no poll/batch tuning) stays a **documented future escape hatch**
+  reserved for a real thousands-per-second SLA — it is not worth the operational cost at current scale.
+  Guard against hammering the DB on empty polls (do not drop the interval to near-zero blindly).
+- **T2 consumer poison handling is distinct from Phase 15.** Phase 15 dead-letters *producer* outbox
+  rows; this is the *consumer* side. The notification consumer retries a validation failure
+  (null `organization_id`) forever and its DLT publish also failed → permanent head-of-line block on a
+  single partition. Fix: `ErrorHandlingDeserializer` + `DefaultErrorHandler.addNotRetryableExceptions(...)`
+  classifying deserialization **and** domain-validation failures (missing required tenant/user) as
+  non-retryable, routed via a `DeadLetterPublishingRecoverer` that republishes **raw bytes** to
+  `*.DLT` (no DB touch, so the DLT path cannot fail on the same constraint that poisoned the message).
+  Short blocking retry (1–2) for transient faults only. Purge the existing `deadbeef…` chaos-test
+  message from `notification.requested.v1`.
+- **T3 partition scaling is set at topic creation, keyed by orgId.** Per-org ordering is the only
+  ordering Heimcall needs; cross-org has none. Adding partitions to an already-keyed topic permanently
+  breaks ordering, so topics are **provisioned with N partitions up front** (not ALTERed live), key =
+  orgId, and consumer concurrency raised to match. Single-broker dev keeps RF=1; sizing target ~1–3
+  MB/s per partition is far above current load, so N is driven by desired consumer parallelism, not raw
+  bytes.
+- **T4 ingest accept latency** is the gateway→202 path, separate from chain throughput. Tune Hikari
+  pool on integration-service and make the synchronous identity key-resolve cheap (Redis-cached
+  resolution with short TTL; key→org/active is effectively static), then re-measure.
+- **T0 commits the harness.** `loadtest/` with the k6 script + idempotent seed script (register→org→
+  keys→service→policy→fallback→contact-method) so the run is reproducible and reviewable. Honors the
+  CPU-governor=performance precondition.
+
+### Ticket breakdown
+
+- **T0 - Load-test harness.** `loadtest/k6/ingest.js` (multi-key ramping-arrival-rate) + `loadtest/seed.sh`
+  + README (governor precondition, how to run, how to read lag). Acceptance: `seed.sh && k6 run` on a
+  fresh local fleet reproduces the baseline table above.
+- **T1 - Relay throughput.** Tune poll-interval/batch; verify multi-instance SKIP LOCKED parallelism.
+  Acceptance: chain throughput ≥ Nx100 msg/s under the same k6 ramp, relay lag drains within target;
+  DB CPU stays sane on idle polls.
+- **T2 - Consumer poison-pill resilience. DONE (ff75c48).** The original diagnosis was wrong: the
+  consumer *already* had `ErrorHandlingDeserializer` + bounded retry + `DeadLetterPublishingRecoverer`
+  (Phase 3.5). The real bug was the **DLT producer's serializer**: `DelegatingByTypeSerializer` built
+  with exact-match (`assignable=false`) over an unordered `Map.of(byte[], Object)`. When the recoverer
+  dead-lettered a *deserialized* event value (the null-org `deadbeef…` record, value =
+  `NotificationRequestedEvent`), no exact `NotificationRequestedEvent.class` delegate matched →
+  `SerializationException: No matching delegate for type` → the DLT publish itself threw → `Seek to
+  current` → infinite redelivery on the single partition, `delivered=0`. incident-service had already
+  hit and fixed this exact bug; the fix ports its construction: `LinkedHashMap` (byte[] first) +
+  `assignable=true`. No non-retryable classification and no manual purge were needed — once the DLT path
+  works, the poison **self-purges** to `.DLT` on the next attempt. Verified live on the frozen 2-day
+  consumer: restarted with the fix → deadbeef landed in `.DLT` (headers `kafka_dlt-exception-cause-fqcn:
+  DataIntegrityViolationException`), consumer advanced past offset 12, drained, `notification.delivered.v1`
+  > 0, mailhog received mail, zero "No matching delegate".
+- **T3 - Partition parallelism. PARTIAL — `notification.requested.v1` DONE (f025ca7).** Provisioned the
+  topic with N partitions up front via a `NewTopic` bean (`heimcall.notification.requested-topic.partitions`,
+  default 4) + `spring.kafka.listener.concurrency=4`. **Key is incidentId** (set by the escalation
+  producer), not orgId: per-incident page ordering is the ordering that matters here, and incidentId is a
+  finer key → better spread + no hot-partition risk for a large org. **Measured (controlled, real
+  chain-produced backlog, only concurrency varied):** concurrency=1 ≈ 100–233 msg/s (one consumer owns all
+  4 partitions, serial) vs concurrency=4 = **744 msg/s** (4 distinct consumers, one per partition) ≈
+  **4.5x** while load is spread. **Key finding:** an existing single-partition backlog does **not**
+  parallelize — those records are physically on p0, drained by one thread (the old p0 backlog reverted the
+  rate to ~100/s once p1–p3 drained). Partitions speed up new/spread load, not data already committed to
+  one partition. Provisioning is at creation, never live-ALTER (rehashes keys, breaks order) — fresh envs
+  get N from the `NewTopic` bean; this dev env was ALTERed once (ordering caveat accepted for the
+  experiment). Remaining: `alert.received.v1` + incident lifecycle topics still `PartitionCount=1`.
+- **T4 - Ingest accept path.** Hikari sizing + Redis-cached key resolution. Acceptance: accept p95 < 2s
+  (PRD incident-creation SLA budget) at the throughput T1/T3 unlock; no 503 from identity timeouts.
+
+### Research notes (researched 2026-06-25)
+
+- **Outbox relay throughput** — *Decision:* tune polling (interval/batch, multi-instance SKIP LOCKED)
+  before CDC. *Evidence:* polling favors simplicity and explicit control; CDC (Debezium) is push-based
+  with no poll/batch tuning but added operational cost, recommended only at thousands/s or strict
+  latency SLAs; constant polling hammers the DB even when empty. *Rejected:* Debezium now (premature
+  operational complexity at current scale).
+- **Consumer poison-pill** — *Decision:* `ErrorHandlingDeserializer` +
+  `DefaultErrorHandler.addNotRetryableExceptions` + raw-bytes `DeadLetterPublishingRecoverer`.
+  *Evidence:* `DefaultErrorHandler` retries everything except fatal deser/conversion by default, so a
+  validation failure blocks the partition forever; blocking retries hold the partition
+  (`FixedBackOff(5s,3)` = 15s lag); non-blocking `@RetryableTopic` is for long backoff windows.
+  *Rejected:* long blocking retries on the main partition.
+- **Partition sizing** — *Decision:* provision N partitions at creation, key=orgId. *Evidence:* max
+  consumer parallelism = partition count (≤1 consumer per partition per group); adding partitions to a
+  keyed topic permanently breaks ordering → over-provision at creation, never ALTER keyed topics live;
+  ~1–3 MB/s per partition is a conservative baseline. *Rejected:* live repartition of keyed topics.
+
+Sources: decodable.co/blog/revisiting-the-outbox-pattern,
+confluent.io/blog/spring-kafka-can-your-kafka-consumers-handle-a-poison-pill,
+docs.spring.io/spring-kafka/reference/kafka/annotation-error-handling.html,
+confluent.io/blog/how-choose-number-topics-partitions-kafka-cluster.
+
 ## 10. Suggested Repository Structure
 
 ```text
