@@ -1,0 +1,184 @@
+{
+  "annotations": { "list": [] },
+  "editable": true,
+  "schemaVersion": 39,
+  "title": "Heimcall — Pipeline Throughput",
+  "tags": ["heimcall", "throughput", "pipeline"],
+  "time": { "from": "now-1h", "to": "now" },
+  "refresh": "15s",
+  "templating": { "list": [] },
+  "panels": [
+    {
+      "id": 100,
+      "type": "row",
+      "title": "Pipeline at a glance (RED — rate, per hop, data-flow order)",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 }
+    },
+    {
+      "id": 1,
+      "title": "Ingest accept (req/s)",
+      "type": "stat",
+      "gridPos": { "h": 5, "w": 6, "x": 0, "y": 1 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "reqps" }, "overrides": [] },
+      "targets": [ { "expr": "sum(rate(http_server_requests_seconds_count{service=\"integration-service\", uri!~\"/actuator.*\"}[1m]))", "legendFormat": "accept" } ]
+    },
+    {
+      "id": 2,
+      "title": "Relay publish (msg/s)",
+      "type": "stat",
+      "gridPos": { "h": 5, "w": 6, "x": 6, "y": 1 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "wps" }, "overrides": [] },
+      "targets": [ { "expr": "sum(rate(outbox_published_total{job=\"heimcall\"}[1m]))", "legendFormat": "published" } ]
+    },
+    {
+      "id": 3,
+      "title": "Kafka consume (msg/s)",
+      "type": "stat",
+      "gridPos": { "h": 5, "w": 6, "x": 12, "y": 1 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "wps" }, "overrides": [] },
+      "targets": [ { "expr": "sum(rate(kafka_consumer_fetch_manager_records_consumed_total{job=\"heimcall\"}[1m]))", "legendFormat": "consumed" } ]
+    },
+    {
+      "id": 4,
+      "title": "Notification deliver (msg/s)",
+      "type": "stat",
+      "gridPos": { "h": 5, "w": 6, "x": 18, "y": 1 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "wps" }, "overrides": [] },
+      "targets": [ { "expr": "sum(rate(notification_delivery_success_total{job=\"heimcall\"}[1m]))", "legendFormat": "delivered" } ]
+    },
+
+    {
+      "id": 110,
+      "type": "row",
+      "title": "1 · Ingest  (gateway → integration → 202)",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 6 }
+    },
+    {
+      "id": 11,
+      "title": "Ingest accept rate by status (req/s)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 7 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "reqps" }, "overrides": [] },
+      "targets": [ { "expr": "sum by (status) (rate(http_server_requests_seconds_count{service=\"integration-service\", uri!~\"/actuator.*\"}[1m]))", "legendFormat": "{{status}}" } ]
+    },
+    {
+      "id": 12,
+      "title": "Ingest accept latency (s, mean / p-max)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 7 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
+      "targets": [
+        { "expr": "sum(rate(http_server_requests_seconds_sum{service=\"integration-service\", uri!~\"/actuator.*\"}[1m])) / sum(rate(http_server_requests_seconds_count{service=\"integration-service\", uri!~\"/actuator.*\"}[1m]))", "legendFormat": "mean" },
+        { "expr": "max(http_server_requests_seconds_max{service=\"integration-service\", uri!~\"/actuator.*\"})", "legendFormat": "max" }
+      ]
+    },
+
+    {
+      "id": 120,
+      "type": "row",
+      "title": "2 · Relay  (outbox → Kafka, per service/topic)",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 15 }
+    },
+    {
+      "id": 21,
+      "title": "Relay publish rate (msg/s)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 16 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "wps" }, "overrides": [] },
+      "targets": [ { "expr": "sum by (service, topic) (rate(outbox_published_total{job=\"heimcall\"}[1m]))", "legendFormat": "{{service}} → {{topic}}" } ]
+    },
+    {
+      "id": 22,
+      "title": "Outbox PENDING depth (backlog)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 16 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
+      "targets": [
+        { "expr": "outbox_pending{job=\"heimcall\"}", "legendFormat": "{{service}}" },
+        { "expr": "sum(outbox_dead_total{job=\"heimcall\"})", "legendFormat": "DEAD (total)" }
+      ]
+    },
+    {
+      "id": 23,
+      "title": "Relay publish latency (s, batch await)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 16 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
+      "targets": [
+        { "expr": "sum by (service) (rate(outbox_publish_seconds_sum{job=\"heimcall\"}[5m])) / sum by (service) (rate(outbox_publish_seconds_count{job=\"heimcall\"}[5m]))", "legendFormat": "{{service}} mean" },
+        { "expr": "max by (service) (outbox_publish_seconds_max{job=\"heimcall\"})", "legendFormat": "{{service}} max" }
+      ]
+    },
+
+    {
+      "id": 130,
+      "type": "row",
+      "title": "3 · Kafka per-stage  (consume rate by service/topic)",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 24 }
+    },
+    {
+      "id": 31,
+      "title": "Records consumed rate (msg/s)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 25 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "wps" }, "overrides": [] },
+      "targets": [ { "expr": "sum by (service, topic) (rate(kafka_consumer_fetch_manager_records_consumed_total{job=\"heimcall\", topic!=\"\"}[1m]))", "legendFormat": "{{service}} ← {{topic}}" } ]
+    },
+
+    {
+      "id": 140,
+      "type": "row",
+      "title": "4 · Escalation & Notify  (downstream rates)",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 33 }
+    },
+    {
+      "id": 41,
+      "title": "Escalation task rate (tasks/s)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 34 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "ops" }, "overrides": [] },
+      "targets": [ { "expr": "sum(rate(escalation_task_executed_total{job=\"heimcall\"}[1m]))", "legendFormat": "executed" } ]
+    },
+    {
+      "id": 42,
+      "title": "Notification delivery rate (msg/s)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 34 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "wps" }, "overrides": [] },
+      "targets": [
+        { "expr": "sum(rate(notification_delivery_success_total{job=\"heimcall\"}[1m]))", "legendFormat": "success (drain)" },
+        { "expr": "sum(rate(notification_delivery_failure_total{job=\"heimcall\"}[1m]))", "legendFormat": "failure" }
+      ]
+    },
+
+    {
+      "id": 150,
+      "type": "row",
+      "title": "5 · Backlog  (consumer lag — app-side; broker-side exporter lands in T2)",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 42 }
+    },
+    {
+      "id": 51,
+      "title": "Kafka consumer lag (max records, app-side)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 43 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
+      "targets": [ { "expr": "max by (service, client_id) (kafka_consumer_fetch_manager_records_lag_max{job=\"heimcall\"})", "legendFormat": "{{service}} / {{client_id}}" } ]
+    }
+  ],
+  "__inputs": [],
+  "__requires": []
+}
