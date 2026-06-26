@@ -166,14 +166,23 @@
     {
       "id": 150,
       "type": "row",
-      "title": "5 · Backlog  (consumer lag — app-side; broker-side exporter lands in T2)",
+      "title": "5 · Backlog  (consumer-group lag)",
       "gridPos": { "h": 1, "w": 24, "x": 0, "y": 42 }
     },
     {
       "id": 51,
-      "title": "Kafka consumer lag (max records, app-side)",
+      "title": "Consumer-group lag — broker-side (KMinion, survives consumer down)",
       "type": "timeseries",
-      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 43 },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 43 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
+      "targets": [ { "expr": "sum by (group_id, topic_name) (kminion_kafka_consumer_group_topic_lag)", "legendFormat": "{{group_id}} ← {{topic_name}}" } ]
+    },
+    {
+      "id": 52,
+      "title": "Consumer lag — app-side (records_lag_max; 0/absent when consumer down)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 43 },
       "datasource": { "type": "prometheus", "uid": "prometheus" },
       "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
       "targets": [ { "expr": "max by (service, client_id) (kafka_consumer_fetch_manager_records_lag_max{job=\"heimcall\"})", "legendFormat": "{{service}} / {{client_id}}" } ]

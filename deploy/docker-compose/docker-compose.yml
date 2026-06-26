@@ -102,6 +102,23 @@ services:
     depends_on:
       - redis
 
+  # Phase 19 T2: broker-side consumer-group lag. Unlike the app-side
+  # kafka_consumer_fetch_manager_records_lag_max (only covers a *live* consumer's assigned partitions,
+  # reads 0/NaN when the consumer is down or rebalancing), KMinion reads committed group offsets from the
+  # broker, so lag stays visible through a consumer freeze — the Phase 18 blind spot. On the compose
+  # network it reaches the broker via the DOCKER listener (kafka:29092); host-net Prometheus scrapes its
+  # published port at localhost:9308.
+  kminion:
+    image: redpandadata/kminion:v2.2.12
+    environment:
+      KAFKA_BROKERS: "kafka:29092"
+      EXPORTER_NAMESPACE: "kminion"
+      MINION_CONSUMERGROUPS_ENABLED: "true"
+    ports:
+      - "9308:8080"
+    depends_on:
+      - kafka
+
   # Phase 8 T4c: dashboards. Auto-provisioned Prometheus datasource + Heimcall dashboards.
   # Login admin/admin (anonymous viewer also enabled). Web UI -> http://localhost:3000.
   # network_mode: host so the datasource reaches Prometheus at localhost:9090 (same firewalld reason).

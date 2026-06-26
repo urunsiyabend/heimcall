@@ -2124,19 +2124,29 @@ spins a JVM), jittery, ungraphable.
 
 ### Ticket breakdown
 
-- **T1 - Relay throughput + depth metrics (code).** `OutboxRelay`: `outbox_published_total` counter (tag
-  `topic`), publish-latency `Timer`, `outbox_pending` gauge (PENDING-row count). Acceptance: after a load
-  run, `rate(outbox_published_total[1m])` per service matches the hand-measured relay rate (~670/s
-  saturated, Phase 18 T1), and `outbox_pending` tracks backlog drain to 0.
-- **T2 - Consumer-group lag exporter.** Broker-side lag exporter container in compose + Prometheus target;
-  lag per `<group, topic>` survives consumer death. Keep app-side `records-lag-max` as complement.
-  Acceptance: stop a consumer mid-backlog → exporter still reports rising lag (app-side would read 0).
-- **T3 - Throughput dashboard (`heimcall-throughput.json`).** RED rows in flow order: ingest accept rate,
-  relay publish rate per service/topic (T1), per-stage consume rate
-  (`kafka_consumer_fetch_manager_records_consumed_rate`) + produce rate (`kafka_producer_record_send_rate`),
-  escalation task rate, notification delivery rate + DeliveryWorker drain rate, and an end-to-end overlay
-  (ingest→delivery rates + per-hop lag from T2). Provisioned like the Phase 8 T4c boards. Acceptance: a
-  k6 run is fully readable off this one board — no CLI/psql needed to see where the pipeline binds.
+- **T1 - Relay throughput + depth metrics (code). DONE.** `OutboxRelay`: `outbox_published_total` counter
+  (tag `topic`), publish-latency `Timer` (`outbox_publish_seconds`, wraps the batch await), `outbox_pending`
+  gauge (PENDING-row `count(*)` per scrape). All null-safe; the non-bean template is untouched (trace
+  linkage preserved). Verified live: cloned-row publish → counter=1, latency mean ~9.6ms (matches Phase 18's
+  ~8ms acks=all), gauge 1→0; Prometheus scrapes all three with the `service` label.
+- **T2 - Consumer-group lag exporter. DONE.** KMinion (`redpandadata/kminion:v2.2.12`) as a compose
+  container reaching the broker via the DOCKER listener (`kafka:29092`); host-net Prometheus scrapes its
+  published port (`localhost:9308`, job `kafka-lag`). Emits `kminion_kafka_consumer_group_topic_lag` per
+  `<group, topic>` from committed broker offsets. Chose KMinion over seglo/kafka-lag-exporter (archived).
+  Acceptance **proven**: stopped incident-service, injected a 120-row backlog to `alert.received.v1` → with
+  the consumer **down**, KMinion lag = 120 while app-side `records_lag_max` had **0 series** (vanished — the
+  Phase 18 blind spot); restart drained both to 0. Board lag panel split into broker-side (KMinion) +
+  app-side complement.
+- **T3 - Throughput dashboard (`heimcall-throughput.json`). DONE.** RED rows in flow order: glance stats
+  (ingest/relay/consume/deliver msg/s), **1 Ingest** (accept rate by status + latency), **2 Relay** (publish
+  rate per service/topic + PENDING/DEAD depth + publish latency — all T1), **3 Kafka** (consumed rate per
+  service/topic via `rate(kafka_consumer_fetch_manager_records_consumed_total[1m])` — the `*_total` counter,
+  since Micrometer doesn't register the `*_rate` gauge), **4 Escalation & Notify** (task rate, delivery
+  success/fail = DeliveryWorker drain), **5 Backlog** (broker-side KMinion lag + app-side complement, T2).
+  Note: the relay producer is a non-bean so there are no `kafka_producer_*` meters — produce rate IS
+  `outbox_published_total`. Auto-provisioned (Phase 8 T4c folder, 10s reload), uid `cfq2qmqfw62v4b`.
+  Verified: Grafana loaded it, all panels resolve real series, rate/latency move under an 80-row burst
+  (1.44 msg/s, 9.6ms). Acceptance: a load run is readable off this one board — no CLI/psql.
 - **T4 - Pipeline-flow polish + e2e latency.** End-to-end alert→delivery latency (p50/90/99) and any
   remaining per-hop duration panels; tidy the board layout (row order = flow). Acceptance: a latency spike
   on the board points at the binding hop.
