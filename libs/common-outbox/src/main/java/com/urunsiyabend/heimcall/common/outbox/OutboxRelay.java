@@ -4,7 +4,9 @@ import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.micrometer.core.instrument.Counter;
+import io.micrometer.core.instrument.Gauge;
 import io.micrometer.core.instrument.MeterRegistry;
+import io.micrometer.core.instrument.Timer;
 import org.apache.kafka.clients.producer.ProducerRecord;
 import org.apache.kafka.common.errors.InvalidTopicException;
 import org.apache.kafka.common.errors.RecordTooLargeException;
@@ -65,7 +67,9 @@ public class OutboxRelay {
     private final int batchSize;
     private final long publishTimeoutMs;
     private final int maxAttempts;
+    private final MeterRegistry meterRegistry;
     private final Counter deadCounter;
+    private final Timer publishTimer;
 
     public OutboxRelay(JdbcTemplate jdbc, KafkaTemplate<String, byte[]> relayTemplate,
                        ObjectMapper objectMapper, int batchSize, long publishTimeoutMs,
@@ -76,7 +80,23 @@ public class OutboxRelay {
         this.batchSize = batchSize;
         this.publishTimeoutMs = publishTimeoutMs;
         this.maxAttempts = maxAttempts;
+        this.meterRegistry = meterRegistry;
+        // Phase 19 T1: the relay template is a non-bean (see class javadoc), so Spring Kafka's auto
+        // `spring.kafka.template` timer never attaches — instrument the publish path by hand here.
+        // `outbox_published_total` is tagged per topic and looked up on the fly (Micrometer caches by
+        // name+tags); the publish-latency timer wraps the batch await; `outbox_pending` is a gauge that
+        // counts PENDING rows on each Prometheus scrape (the relay backlog depth).
         this.deadCounter = meterRegistry != null ? meterRegistry.counter("outbox_dead_total") : null;
+        this.publishTimer = meterRegistry != null ? meterRegistry.timer("outbox_publish_seconds") : null;
+        if (meterRegistry != null) {
+            Gauge.builder("outbox_pending", jdbc, OutboxRelay::pendingDepth).register(meterRegistry);
+        }
+    }
+
+    /** PENDING backlog depth, polled by the {@code outbox_pending} gauge on each scrape. */
+    private static double pendingDepth(JdbcTemplate jdbc) {
+        Long count = jdbc.queryForObject("SELECT count(*) FROM outbox WHERE status = 'PENDING'", Long.class);
+        return count != null ? count : 0d;
     }
 
     @Scheduled(fixedDelayString = "${heimcall.outbox.poll-interval-ms:200}")
@@ -131,6 +151,7 @@ public class OutboxRelay {
         // classified after the whole batch is in, so we can tell a broker-wide outage from a poison row.
         List<Long> published = new ArrayList<>();
         Map<Long, Throwable> failures = new LinkedHashMap<>();
+        Timer.Sample sample = publishTimer != null ? Timer.start(meterRegistry) : null;
         for (Map.Entry<Long, CompletableFuture<?>> e : inFlight.entrySet()) {
             try {
                 e.getValue().get(publishTimeoutMs, TimeUnit.MILLISECONDS);
@@ -142,8 +163,12 @@ public class OutboxRelay {
                 failures.put(e.getKey(), ex);
             }
         }
+        if (sample != null) {
+            sample.stop(publishTimer);
+        }
 
         markPublished(published);
+        countPublished(published, topicById);
 
         // A row that failed while others in the same batch succeeded is row-specific — count it toward the
         // dead-letter backstop. If NOTHING in the batch succeeded, treat it as a broker-wide outage and
@@ -187,6 +212,20 @@ public class OutboxRelay {
         jdbc.update("UPDATE outbox SET status = 'PUBLISHED', published_at = ?, attempts = attempts + 1 "
                 + "WHERE id IN (" + placeholders + ")", args);
         log.debug("Relayed {} outbox rows", ids.size());
+    }
+
+    /** Bumps {@code outbox_published_total} per topic for the rows just marked PUBLISHED (no-op if no registry). */
+    private void countPublished(List<Long> ids, Map<Long, String> topicById) {
+        if (meterRegistry == null || ids.isEmpty()) {
+            return;
+        }
+        Map<String, Long> perTopic = new LinkedHashMap<>();
+        for (Long id : ids) {
+            perTopic.merge(topicById.get(id), 1L, Long::sum);
+        }
+        for (Map.Entry<String, Long> e : perTopic.entrySet()) {
+            meterRegistry.counter("outbox_published_total", "topic", e.getKey()).increment(e.getValue());
+        }
     }
 
     /** Flags a row {@code DEAD} (bumping attempts), increments the dead counter, logs loudly. */
