@@ -2001,9 +2001,22 @@ the 2026-06-25 run and must move it.
 - **T0 - Load-test harness.** `loadtest/k6/ingest.js` (multi-key ramping-arrival-rate) + `loadtest/seed.sh`
   + README (governor precondition, how to run, how to read lag). Acceptance: `seed.sh && k6 run` on a
   fresh local fleet reproduces the baseline table above.
-- **T1 - Relay throughput.** Tune poll-interval/batch; verify multi-instance SKIP LOCKED parallelism.
-  Acceptance: chain throughput ≥ Nx100 msg/s under the same k6 ramp, relay lag drains within target;
-  DB CPU stays sane on idle polls.
+- **T1 - Relay throughput. DONE (82a3167).** The plan's "tune polling first" lever was measured
+  **insufficient**: lowering poll-interval (1000→200ms) and raising batch (100→200) moved the rate only
+  ~90→110/s. The real ceiling is a **synchronous `relayTemplate.send(record).get(timeout)` per row** —
+  each row blocks on its own broker ack (~8ms with acks=all on the local broker), so the batch drains
+  serially no matter how big it is or how often we poll. Fix = **pipeline**: fire every send in the batch
+  first (collect futures, no await), then await them together (the idempotent acks=all producer batches
+  the in-flight records into a few round-trips), then **bulk-mark** the succeeded rows PUBLISHED in one
+  UPDATE. Measured **~670/s saturated (~6x)**. Correctness preserved and proven: whole batch still in one
+  tx (crash before commit → all rows PENDING → at-least-once, consumers dedupe on eventId); the NOT EXISTS
+  guard claims one row per aggregate per batch so the rows are distinct aggregates (no ordering link →
+  safe to send concurrently and mark independently); **broker blackout** (no send in the batch succeeds)
+  leaves rows PENDING untouched — no mass dead-letter — while a **row-specific** failure (others in the
+  batch succeeded) still counts toward the maxAttempts backstop. Unit tests rewritten for the new
+  transient/blackout semantics; runtime drain verified DEAD=0, full drain, no loss. Defaults: poll-interval
+  1000→200ms, batch 100→200, in `common-outbox` (applies to every producer service). Deferred: the
+  adaptive drain-loop (drain fully per tick) — unnecessary at current scale once pipelined.
 - **T2 - Consumer poison-pill resilience. DONE (ff75c48).** The original diagnosis was wrong: the
   consumer *already* had `ErrorHandlingDeserializer` + bounded retry + `DeadLetterPublishingRecoverer`
   (Phase 3.5). The real bug was the **DLT producer's serializer**: `DelegatingByTypeSerializer` built
@@ -2056,6 +2069,31 @@ Sources: decodable.co/blog/revisiting-the-outbox-pattern,
 confluent.io/blog/spring-kafka-can-your-kafka-consumers-handle-a-poison-pill,
 docs.spring.io/spring-kafka/reference/kafka/annotation-error-handling.html,
 confluent.io/blog/how-choose-number-topics-partitions-kafka-cluster.
+
+## Phase 19 - Observability for throughput & flow (NEXT, prioritized)
+
+Goal: make the event pipeline measurable from Prometheus/Grafana instead of kafka CLI + psql. Phase 18
+exposed that there is **no metric for relay publish rate, per-stage consume/produce rate, consumer-group
+lag, or delivery rate** — every Phase 18 number was scraped by hand (`kafka-consumer-groups`,
+`GetOffsetShell`, `psql`), which is slow (each `kafka-run-class` spins a JVM), jittery, and impossible to
+graph. This phase is a prerequisite for continuing the measurement/optimization loop (T0 harness, T4
+ingest path, the stage-2 `DeliveryWorker` anti-pattern, T3 for the remaining topics).
+
+This phase needs a **research gate** (observability is an external domain) before building — spec the
+metric/dashboard design from current practice (Micrometer + Prometheus + Kafka client metrics, USE/RED,
+consumer-lag exporters) and fold it in as a Research notes decision record.
+
+Candidate scope (to be specced next session):
+- **Outbox relay metrics** — `outbox_published_total` counter (per service/topic), batch-size and
+  publish-latency timers, PENDING-depth gauge. (The relay's Kafka template is intentionally a non-bean to
+  avoid the tracing BeanPostProcessor, so it is currently un-instrumented — add explicit Micrometer.)
+- **Consumer-group lag** — a Kafka lag exporter (or app-side gauge) for every `<group, topic>` so backlog
+  is graphable, not polled by `kafka-consumer-groups`.
+- **Per-stage throughput** — record-consume/produce rates per service; end-to-end alert→delivery latency.
+- **Delivery metrics** — `notification_delivery_success_total` already exists; surface req/s panels and
+  the DeliveryWorker queue depth / send-latency.
+- **Grafana dashboards** — a pipeline-flow board (ingest → incident → escalation → relay → notify →
+  deliver) with per-hop rate + lag, so the next optimization step is read off a graph, not a CLI.
 
 ## 10. Suggested Repository Structure
 
