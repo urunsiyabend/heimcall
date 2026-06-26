@@ -40,7 +40,7 @@ public class HeimcallOutboxAutoConfiguration {
     @Bean
     public OutboxRelay outboxRelay(JdbcTemplate jdbcTemplate, KafkaProperties kafkaProperties,
                                    ObjectMapper objectMapper, ObjectProvider<MeterRegistry> meterRegistryProvider,
-                                   @Value("${heimcall.outbox.batch-size:100}") int batchSize,
+                                   @Value("${heimcall.outbox.batch-size:200}") int batchSize,
                                    @Value("${heimcall.outbox.publish-timeout-ms:10000}") long publishTimeoutMs,
                                    @Value("${heimcall.outbox.max-attempts:10}") int maxAttempts) {
         Map<String, Object> producerProps = kafkaProperties.buildProducerProperties(null);

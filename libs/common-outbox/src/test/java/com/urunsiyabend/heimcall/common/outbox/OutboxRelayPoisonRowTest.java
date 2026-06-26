@@ -126,39 +126,71 @@ class OutboxRelayPoisonRowTest {
 
     @Test
     @SuppressWarnings("unchecked")
-    void transientFailureBreaksRoundThenDeadLettersAfterMaxAttempts() {
+    void rowSpecificTransientFailureDeadLettersAfterMaxAttemptsWhileGoodRowsFlow() {
         assumeTrue(jdbc != null, "no PG");
         insert(1, "X", "{}");  // transient-failing, aggregate X
-        insert(2, "Y", "{}");  // good, aggregate Y — starved while X keeps failing (correct: looks like an outage)
+        insert(2, "Y", "{}");  // good, aggregate Y
 
         KafkaTemplate<String, byte[]> kafka = mock(KafkaTemplate.class);
         SendResult<String, byte[]> ok = new SendResult<>(null,
                 new RecordMetadata(new TopicPartition("incident.lifecycle.v1", 0), 0, 0, 0, 0, 0));
-        // Row X fails with a transient broker TimeoutException (NOT a permanent rejection); row Y succeeds.
+        // Aggregate X always fails with a transient broker TimeoutException (NOT a permanent rejection);
+        // every other aggregate succeeds — so the broker is demonstrably reachable each poll.
         when(kafka.send(any(ProducerRecord.class))).thenAnswer(inv -> {
             ProducerRecord<String, byte[]> r = inv.getArgument(0);
-            return "Y".equals(r.key())
-                    ? CompletableFuture.completedFuture(ok)
-                    : CompletableFuture.failedFuture(new TimeoutException("broker down"));
+            return "X".equals(r.key())
+                    ? CompletableFuture.failedFuture(new TimeoutException("broker down"))
+                    : CompletableFuture.completedFuture(ok);
         });
         SimpleMeterRegistry meters = new SimpleMeterRegistry();
-
         OutboxRelay relay = new OutboxRelay(jdbc, kafka, new ObjectMapper(), 10, 1000, 3, meters);
 
-        // Polls 1 & 2: row 1 fails transiently, attempts climb, round breaks — row 2 never tried.
+        // Poll 1: pipelined — the good row publishes the SAME round (no head-of-line starvation), and
+        // because the broker is reachable (Y succeeded) the failing row X is counted toward the backstop.
         relay.relay();
+        assertThat(status(2)).isEqualTo("PUBLISHED");
         assertThat(status(1)).isEqualTo("PENDING");
         assertThat(attempts(1)).isEqualTo(1);
-        assertThat(status(2)).isEqualTo("PENDING");
 
+        // A fresh good row each poll keeps the broker visibly reachable, so X keeps accruing attempts.
+        insert(3, "Z", "{}");
         relay.relay();
+        assertThat(status(3)).isEqualTo("PUBLISHED");
         assertThat(attempts(1)).isEqualTo(2);
 
-        // Poll 3: attempts hits maxAttempts(3) -> backstop dead-letters row 1 and continues -> row 2 flows.
-        relay.relay();
+        insert(4, "W", "{}");
+        relay.relay();  // attempts hits maxAttempts(3) -> backstop dead-letters X
+        assertThat(status(4)).isEqualTo("PUBLISHED");
         assertThat(status(1)).isEqualTo("DEAD");
         assertThat(attempts(1)).isEqualTo(3);
-        assertThat(status(2)).isEqualTo("PUBLISHED");
         assertThat(meters.counter("outbox_dead_total").count()).isEqualTo(1.0);
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void brokerBlackoutLeavesAllRowsPendingWithoutDeadLettering() {
+        assumeTrue(jdbc != null, "no PG");
+        insert(1, "X", "{}");
+        insert(2, "Y", "{}");
+
+        KafkaTemplate<String, byte[]> kafka = mock(KafkaTemplate.class);
+        // Total outage: every send fails transiently, nothing succeeds in the batch.
+        when(kafka.send(any(ProducerRecord.class)))
+                .thenReturn(CompletableFuture.failedFuture(new TimeoutException("broker down")));
+        SimpleMeterRegistry meters = new SimpleMeterRegistry();
+        OutboxRelay relay = new OutboxRelay(jdbc, kafka, new ObjectMapper(), 10, 1000, 3, meters);
+
+        // Several polls of full blackout must NOT bleed the backlog into DEAD: with no success in the
+        // batch the relay can't tell a poison row from an outage, so it leaves every row PENDING untouched
+        // (no attempt bump, no DEAD). When the broker recovers the whole backlog drains — no row is lost.
+        relay.relay();
+        relay.relay();
+        relay.relay();
+        relay.relay();
+        assertThat(status(1)).isEqualTo("PENDING");
+        assertThat(status(2)).isEqualTo("PENDING");
+        assertThat(attempts(1)).isEqualTo(0);
+        assertThat(attempts(2)).isEqualTo(0);
+        assertThat(meters.counter("outbox_dead_total").count()).isEqualTo(0.0);
     }
 }

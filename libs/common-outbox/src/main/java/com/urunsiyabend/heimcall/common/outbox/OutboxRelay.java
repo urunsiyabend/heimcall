@@ -19,8 +19,12 @@ import org.springframework.transaction.annotation.Transactional;
 
 import java.sql.Timestamp;
 import java.time.Instant;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
 
 /**
@@ -75,10 +79,23 @@ public class OutboxRelay {
         this.deadCounter = meterRegistry != null ? meterRegistry.counter("outbox_dead_total") : null;
     }
 
-    @Scheduled(fixedDelayString = "${heimcall.outbox.poll-interval-ms:1000}")
+    @Scheduled(fixedDelayString = "${heimcall.outbox.poll-interval-ms:200}")
     @Transactional
     public void relay() {
         List<Map<String, Object>> rows = jdbc.queryForList(CLAIM_SQL, batchSize);
+        if (rows.isEmpty()) {
+            return;
+        }
+
+        // Fire every send first, then await — the producer (idempotent, acks=all) pipelines the in-flight
+        // records into a few broker round-trips instead of one blocking ack per row, which is the relay's
+        // throughput ceiling. Safe because the CLAIM_SQL NOT EXISTS guard claims at most one row per
+        // aggregate, so every row in this batch is a distinct aggregate with no ordering relationship: they
+        // can be sent concurrently and marked independently without breaking per-aggregate order. The whole
+        // claim -> send -> mark still runs in one transaction, so a crash before commit leaves every row
+        // PENDING and re-sent next poll (at-least-once; consumers dedupe on eventId) — no row is ever lost.
+        Map<Long, CompletableFuture<?>> inFlight = new LinkedHashMap<>();
+        Map<Long, String> topicById = new LinkedHashMap<>();
         for (Map<String, Object> row : rows) {
             long id = ((Number) row.get("id")).longValue();
             String topic = (String) row.get("topic");
@@ -96,40 +113,80 @@ public class OutboxRelay {
                 continue;
             }
 
+            ProducerRecord<String, byte[]> record = new ProducerRecord<>(topic, key, payload);
+            for (Map.Entry<String, String> h : headers.entrySet()) {
+                record.headers().add(h.getKey(), OutboxAppender.utf8(h.getValue()));
+            }
+            topicById.put(id, topic);
             try {
-                ProducerRecord<String, byte[]> record = new ProducerRecord<>(topic, key, payload);
-                for (Map.Entry<String, String> h : headers.entrySet()) {
-                    record.headers().add(h.getKey(), OutboxAppender.utf8(h.getValue()));
-                }
-                relayTemplate.send(record).get(publishTimeoutMs, TimeUnit.MILLISECONDS);
-                jdbc.update("UPDATE outbox SET status = 'PUBLISHED', published_at = ?, attempts = attempts + 1 WHERE id = ?",
-                        Timestamp.from(Instant.now()), id);
-                log.debug("Relayed outbox row {} to {}", id, topic);
-            } catch (Exception e) {
-                if (e instanceof InterruptedException) {
-                    Thread.currentThread().interrupt();
-                }
-                // A deterministically permanent broker rejection (too-large, unknown topic, bad
-                // serialization) will fail every retry — dead-letter it and keep draining the batch.
-                if (isPermanent(e)) {
-                    deadLetter(id, topic, e.getMessage());
-                    continue;
-                }
-                // Transient (broker outage / timeout): bump attempts and stop the round — the rest of
-                // the batch almost certainly fails the same way, so spinning wastes the poll. The row
-                // stays PENDING and retries next poll. A backstop dead-letters it once it has burned
-                // through maxAttempts, so an unforeseen always-failing row can never stall forever.
-                int attempts = bumpAttempts(id, e.getMessage());
+                inFlight.put(id, relayTemplate.send(record));
+            } catch (RuntimeException sendError) {
+                // Synchronous send failure (e.g. producer buffer exhausted) — treat as transient and let
+                // the await pass leave the row PENDING for the next poll.
+                inFlight.put(id, CompletableFuture.failedFuture(sendError));
+            }
+        }
+
+        // Await all acks. Each successful row is collected for a single bulk PUBLISHED mark; failures are
+        // classified after the whole batch is in, so we can tell a broker-wide outage from a poison row.
+        List<Long> published = new ArrayList<>();
+        Map<Long, Throwable> failures = new LinkedHashMap<>();
+        for (Map.Entry<Long, CompletableFuture<?>> e : inFlight.entrySet()) {
+            try {
+                e.getValue().get(publishTimeoutMs, TimeUnit.MILLISECONDS);
+                published.add(e.getKey());
+            } catch (InterruptedException ie) {
+                Thread.currentThread().interrupt();
+                failures.put(e.getKey(), ie);
+            } catch (Exception ex) {
+                failures.put(e.getKey(), ex);
+            }
+        }
+
+        markPublished(published);
+
+        // A row that failed while others in the same batch succeeded is row-specific — count it toward the
+        // dead-letter backstop. If NOTHING in the batch succeeded, treat it as a broker-wide outage and
+        // leave the rows PENDING untouched (no attempt bump, no DEAD) so a transient outage can never bleed
+        // the whole backlog into the dead-letter state — it simply retries next poll.
+        boolean brokerReachable = !published.isEmpty();
+        for (Map.Entry<Long, Throwable> f : failures.entrySet()) {
+            long id = f.getKey();
+            String topic = topicById.get(id);
+            Throwable ex = f.getValue();
+            if (isPermanent(ex)) {
+                deadLetter(id, topic, ex.getMessage());
+            } else if (brokerReachable) {
+                int attempts = bumpAttempts(id, ex.getMessage());
                 if (attempts >= maxAttempts) {
                     markDead(id);
                     log.error("Dead-lettered outbox row {} to {} after {} failed attempts: {}",
-                            id, topic, attempts, e.getMessage());
-                    continue;
+                            id, topic, attempts, ex.getMessage());
+                } else {
+                    log.error("Failed to relay outbox row {} to {} (attempt {}): {}",
+                            id, topic, attempts, ex.getMessage());
                 }
-                log.error("Failed to relay outbox row {} to {} (attempt {}): {}", id, topic, attempts, e.getMessage());
-                break;
+            } else {
+                log.warn("Outbox row {} to {} not relayed (broker unreachable this poll), staying PENDING: {}",
+                        id, topic, ex.getMessage());
             }
         }
+    }
+
+    /** Marks a batch of successfully-published rows PUBLISHED in one statement (bumping each attempt). */
+    private void markPublished(List<Long> ids) {
+        if (ids.isEmpty()) {
+            return;
+        }
+        String placeholders = String.join(",", Collections.nCopies(ids.size(), "?"));
+        Object[] args = new Object[ids.size() + 1];
+        args[0] = Timestamp.from(Instant.now());
+        for (int i = 0; i < ids.size(); i++) {
+            args[i + 1] = ids.get(i);
+        }
+        jdbc.update("UPDATE outbox SET status = 'PUBLISHED', published_at = ?, attempts = attempts + 1 "
+                + "WHERE id IN (" + placeholders + ")", args);
+        log.debug("Relayed {} outbox rows", ids.size());
     }
 
     /** Flags a row {@code DEAD} (bumping attempts), increments the dead counter, logs loudly. */
