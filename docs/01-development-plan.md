@@ -2147,9 +2147,33 @@ spins a JVM), jittery, ungraphable.
   `outbox_published_total`. Auto-provisioned (Phase 8 T4c folder, 10s reload), uid `cfq2qmqfw62v4b`.
   Verified: Grafana loaded it, all panels resolve real series, rate/latency move under an 80-row burst
   (1.44 msg/s, 9.6ms). Acceptance: a load run is readable off this one board — no CLI/psql.
-- **T4 - Pipeline-flow polish + e2e latency.** End-to-end alert→delivery latency (p50/90/99) and any
-  remaining per-hop duration panels; tidy the board layout (row order = flow). Acceptance: a latency spike
-  on the board points at the binding hop.
+- **T4 - Per-stage latency (p50/90/99). DONE.** Fleet-wide HTTP histogram buckets via the observability
+  `EnvironmentPostProcessor` (`management.metrics.distribution.percentiles-histogram.http.server.requests`)
+  so ingest accept latency reads true p50/90/99 (not just a mean). New notification-stage Timer
+  `notification_delivery_latency_seconds` (`request.receivedAt → delivered`, histogram) — surfaces the
+  DeliveryWorker poll-wait + send cost (the stage-2 serial-poll anti-pattern). Board ingest + stage-latency
+  panels switched to `histogram_quantile`. Verified: 138 HTTP bucket series on integration; stage timer
+  records on delivery.
+- **T5 - True end-to-end alert→delivered latency. DONE (added this session on request).** One aggregated
+  Prometheus quantile for the *whole* pipeline. Scope stayed small because the alert origin already flows:
+  `AlertReceivedEvent.occurredAt` → incident `Triggered.at` → `IncidentTriggeredEvent.occurredAt` →
+  (escalation persists it as) `EscalationIncident.triggeredAt`. So T5 = **one new event field**
+  (`NotificationRequestedEvent.alertOccurredAt`, set from `EscalationIncident.triggeredAt` in
+  `fireDueTask`) + **one new column** (`notification_request.alert_occurred_at`, Flyway V3, nullable) +
+  a `notification_e2e_latency_seconds` histogram recorded at delivery (`deliveredAt − alertOccurredAt`).
+  Nullable end-to-end → a pre-T5 in-flight message carries no origin and the e2e timer skips it (proven:
+  old request row `has_origin=f`, new one `t`). **Verified live:** injected a fresh CRITICAL alert through
+  the whole chain on rebuilt jars → e2e count=1, **p50 ≈ 20s** (escalation level-1 delay + 5s delivery poll
+  dominate — expected, that latency is the escalation cadence, not pipeline overhead); board e2e p50/90/99
+  panel resolves. Note: `occurredAt` is alert-supplied (the documented origin); the board labels it
+  alert→delivered. The "delivered count" stat uses `round(increase(...))` + a cumulative `total` series
+  (raw `increase()` extrapolates to fractional at range edges).
+- **Close-out.** Lag exporter (KMinion) is a compose-local infra concern, exactly like the Phase 8 T4c
+  postgres/redis exporters and the Prometheus/Grafana stack — none live in `deploy/helm` (the chart deploys
+  only the 8 services; observability infra is BYO, pods carry `prometheus.io/scrape`). So no helm change; in
+  k8s, bring your own lag exporter. Deferred (Phase-18-style follow-up, made *visible* not *fixed* here): the
+  DeliveryWorker serial 5s-poll drain — its latency now shows on the board (stage + e2e), re-architecture is
+  a separate perf ticket.
 
 ### Research notes (researched 2026-06-26)
 

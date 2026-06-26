@@ -784,3 +784,42 @@ leaves the hot path (consistency AND availability); cold-miss lazy-sync + reconc
 projection states (READY/ABSENT_CONFIRMED/UNINITIALIZED/STALE). The shared evaluator (`libs/routing-core`,
 extracted from catalog only in T2) is a pure engine + rules-as-data (OPA / feature-flag-SDK pattern), not
 shared domain logic. Full spec + Research notes (decision record + sources) in plan Phase 17.
+
+**Phase 18 - Throughput & Consumer Resilience under Load** (T1/T2/T3 done; T0/T4 open). First real load
+test of the alert→incident→escalation→notification path. **T1**: the outbox relay's per-row synchronous
+`send().get()` was the throughput ceiling (~100/s); rewrote to **pipeline** the whole batch (fire all sends,
+await together, bulk-mark PUBLISHED) → **~670/s (~6x)**, correctness preserved (one tx, NOT-EXISTS guard
+keeps batch rows distinct aggregates, broker blackout leaves rows PENDING). Defaults poll 1000→200ms,
+batch 100→200. **T2**: notification consumer poison-pill — the real bug was the **DLT producer's
+serializer** (`DelegatingByTypeSerializer` exact-match over an unordered map) throwing `No matching delegate`,
+so the recoverer's republish failed → infinite redelivery, `delivered=0`; fixed with `LinkedHashMap` +
+`assignable=true` (ported from incident-service). **T3**: `notification.requested.v1` provisioned with N
+partitions up front (`NewTopic` bean, default 4) + consumer concurrency 4, key=incidentId → **~4.5x** on
+spread load (an existing single-partition backlog does NOT parallelize). Remaining: `alert.received.v1` +
+lifecycle topics still 1 partition; T0 harness + T4 ingest path open. See plan Phase 18.
+
+**Phase 19 - Observability for throughput & flow** (T1–T5 done, 2026-06-26). Phase 18 exposed that the
+event pipeline had no graphable metric for relay publish rate, per-stage rate, consumer lag, or delivery —
+every number was hand-scraped. Built on the Phase 8 stack (Prometheus host-net, Grafana, domain counters,
+app-side Kafka client meters). **T1 - relay metrics**: the relay's `KafkaTemplate` is a deliberate non-bean
+(so the tracing BPP can't sever trace linkage) → instrumented by hand: `outbox_published_total{topic}`
+counter, `outbox_publish_seconds` Timer (batch await), `outbox_pending` gauge (`count(*) PENDING` per
+scrape). In `common-outbox`, applies to every producer. **T2 - broker-side lag**: KMinion
+(`redpandadata/kminion:v2.2.12`) compose container reaching the broker via the DOCKER listener
+(`kafka:29092`), host-net Prometheus scrapes `localhost:9308` (job `kafka-lag`), emits
+`kminion_kafka_consumer_group_topic_lag` from committed offsets — survives consumer death, unlike the
+app-side `records_lag_max` (only assigned partitions, 0/NaN when the consumer is down). Proven: consumer
+down + 120-row backlog → KMinion=120 while app-side had 0 series. Chose KMinion over seglo/kafka-lag-exporter
+(archived). **T3 - throughput dashboard** (`heimcall-throughput.json`, uid `cfq2qmqfw62v4b`): RED-shaped, one
+row per hop in flow order (glance stats → ingest → relay → kafka consume → escalation/notify → backlog →
+end-to-end). Most per-stage rate panels are panels-only off existing client `*_total` counters; the relay
+rate IS `outbox_published_total` (non-bean producer has no `kafka_producer_*`). **T4 - per-stage latency**:
+fleet-wide HTTP histogram buckets via the observability `EnvironmentPostProcessor` → ingest p50/90/99;
+`notification_delivery_latency_seconds` Timer (received→delivered = the DeliveryWorker hop). **T5 - true
+end-to-end latency**: the alert origin already flows (`AlertReceivedEvent.occurredAt` → `IncidentTriggered`
+→ `EscalationIncident.triggeredAt`), so just one event field (`NotificationRequestedEvent.alertOccurredAt`)
++ one column (`notification_request.alert_occurred_at`, Flyway V3, nullable) + a `notification_e2e_latency_seconds`
+histogram at delivery; nullable so pre-T5 in-flight messages skip it. Proven live: fresh alert → e2e p50 ≈
+20s (escalation level-1 delay + 5s delivery poll dominate). Lag exporter stays compose-local infra (BYO in
+k8s, like the pg/redis exporters — not in helm). Known gap surfaced (made visible, not fixed): the
+DeliveryWorker serial 5s-poll drain — a Phase-18-style perf follow-up. See plan Phase 19.
