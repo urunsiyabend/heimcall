@@ -2079,21 +2079,95 @@ lag, or delivery rate** — every Phase 18 number was scraped by hand (`kafka-co
 graph. This phase is a prerequisite for continuing the measurement/optimization loop (T0 harness, T4
 ingest path, the stage-2 `DeliveryWorker` anti-pattern, T3 for the remaining topics).
 
-This phase needs a **research gate** (observability is an external domain) before building — spec the
-metric/dashboard design from current practice (Micrometer + Prometheus + Kafka client metrics, USE/RED,
-consumer-lag exporters) and fold it in as a Research notes decision record.
+### What Phase 8 already shipped (baseline — do not rebuild)
 
-Candidate scope (to be specced next session):
-- **Outbox relay metrics** — `outbox_published_total` counter (per service/topic), batch-size and
-  publish-latency timers, PENDING-depth gauge. (The relay's Kafka template is intentionally a non-bean to
-  avoid the tracing BeanPostProcessor, so it is currently un-instrumented — add explicit Micrometer.)
-- **Consumer-group lag** — a Kafka lag exporter (or app-side gauge) for every `<group, topic>` so backlog
-  is graphable, not polled by `kafka-consumer-groups`.
-- **Per-stage throughput** — record-consume/produce rates per service; end-to-end alert→delivery latency.
-- **Delivery metrics** — `notification_delivery_success_total` already exists; surface req/s panels and
-  the DeliveryWorker queue depth / send-latency.
-- **Grafana dashboards** — a pipeline-flow board (ingest → incident → escalation → relay → notify →
-  deliver) with per-hop rate + lag, so the next optimization step is read off a graph, not a CLI.
+Prometheus (`:9090`, host-net) scraping all 8 services + postgres/redis exporters; Grafana (`:3000`) with
+four provisioned dashboards (JVM/HTTP, Heimcall-domain, PostgreSQL, Redis); domain counters
+(`incident_*_total`, `escalation_task_executed_total`, `notification_delivery_success/failure_total`,
+`incident_time_to_ack/resolve_seconds`); native Kafka client meters attached to the consumer/producer
+**factories** (Phase 8 T3) so `kafka_consumer_fetch_manager_records_consumed_rate`,
+`kafka_producer_record_send_rate`, and app-side `kafka_consumer_fetch_manager_records_lag_max` are already
+exported for every stage; OTLP tracing to Jaeger.
+
+### The gap (measured 2026-06-26 against the live dashboards)
+
+Existing throughput panels: HTTP req/s, incident-lifecycle rate, notification-delivery rate, app-side
+consumer lag. **Missing the entire event-pipeline throughput picture:** (a) **relay publish rate** — the
+`OutboxRelay` `KafkaTemplate` is a deliberate non-bean (so the tracing BeanPostProcessor can't flip
+observation and break trace linkage — see relay javadoc), so it is **completely un-instrumented**; (b)
+**per-stage consume/produce rate** — the client meters exist but have **no panels**; (c) **broker-side
+consumer lag** — the only lag metric today is app-side, which reports only *assigned* partitions and reads
+**zero when the consumer is down or rebalancing** (precisely the Phase 18 freeze: 28,942 backlog would have
+shown lag≈0 or vanished — invisible); (d) **DeliveryWorker drain rate / PENDING depth**. Every Phase 18
+number was hand-scraped (`kafka-consumer-groups`, `GetOffsetShell`, `psql`) — slow (each `kafka-run-class`
+spins a JVM), jittery, ungraphable.
+
+### Design decisions (locked 2026-06-26, research-driven — see Research notes below)
+
+- **T1 instruments the relay by hand, not via Spring's auto-timer.** Spring Kafka's `spring.kafka.template`
+  timer binds only to the auto-created template; the relay's template is a non-bean by design, so it gets
+  explicit Micrometer (the relay already holds the `MeterRegistry` for `outbox_dead_total`). Counter
+  `outbox_published_total` (rate-normalize with `rate()` at query time, never pre-divide), publish-latency
+  `Timer` over the batch-await, `outbox_pending` gauge (cheap `SELECT count` per scrape). Consistent tag
+  keys per metric name (`topic`) — Prometheus rejects same-name/different-tags.
+- **T2 adds a broker-side lag exporter as the truth source.** App-side `records-lag-max` is kept (cheap,
+  per-instance) but cannot see a dead consumer's backlog; a broker-side exporter reads committed group
+  offsets independent of consumer liveness, so lag stays visible through a freeze/rebalance. Dedicated
+  exporter container (kafka-lag-exporter / KMinion), scraped by the existing host-net Prometheus, lag per
+  `<group, topic, partition>`.
+- **T3 is a first-class throughput dashboard (RED-shaped).** Rate/Errors/Duration, **one row per hop in
+  data-flow order** (ingest → incident → escalation → relay → notify → deliver); duration as p50/p90/p99;
+  alert on RED symptoms, not USE causes. Most per-stage rate panels are panels-only (client meters already
+  exported); only the relay rate needed code (T1).
+- **DeliveryWorker serial-poll anti-pattern stays a Phase-18-style follow-up** — Phase 19 only makes its
+  depth/rate *visible* (PENDING-delivery gauge + drain rate), it does not re-architect the worker.
+
+### Ticket breakdown
+
+- **T1 - Relay throughput + depth metrics (code).** `OutboxRelay`: `outbox_published_total` counter (tag
+  `topic`), publish-latency `Timer`, `outbox_pending` gauge (PENDING-row count). Acceptance: after a load
+  run, `rate(outbox_published_total[1m])` per service matches the hand-measured relay rate (~670/s
+  saturated, Phase 18 T1), and `outbox_pending` tracks backlog drain to 0.
+- **T2 - Consumer-group lag exporter.** Broker-side lag exporter container in compose + Prometheus target;
+  lag per `<group, topic>` survives consumer death. Keep app-side `records-lag-max` as complement.
+  Acceptance: stop a consumer mid-backlog → exporter still reports rising lag (app-side would read 0).
+- **T3 - Throughput dashboard (`heimcall-throughput.json`).** RED rows in flow order: ingest accept rate,
+  relay publish rate per service/topic (T1), per-stage consume rate
+  (`kafka_consumer_fetch_manager_records_consumed_rate`) + produce rate (`kafka_producer_record_send_rate`),
+  escalation task rate, notification delivery rate + DeliveryWorker drain rate, and an end-to-end overlay
+  (ingest→delivery rates + per-hop lag from T2). Provisioned like the Phase 8 T4c boards. Acceptance: a
+  k6 run is fully readable off this one board — no CLI/psql needed to see where the pipeline binds.
+- **T4 - Pipeline-flow polish + e2e latency.** End-to-end alert→delivery latency (p50/90/99) and any
+  remaining per-hop duration panels; tidy the board layout (row order = flow). Acceptance: a latency spike
+  on the board points at the binding hop.
+
+### Research notes (researched 2026-06-26)
+
+- **Custom producer instrumentation** — *Question:* how to meter the relay's publish rate/latency when its
+  template is a non-bean. *Decision:* explicit Micrometer `Counter` + `Timer` (+ `Gauge` for depth);
+  rate-normalize counters at query time with `rate()`, keep tag keys consistent per metric name. *Evidence:*
+  Spring Kafka's auto `spring.kafka.template` timer binds only to the template it auto-creates (custom
+  producers need manual instrumentation); Micrometer docs recommend rate-normalizing counters at query time
+  and warn that registering one meter name with differing tag-key sets breaks Prometheus. *Rejected:*
+  exposing the relay template as a bean to get the auto-timer (would let the tracing BPP inject a fresh
+  `traceparent` and sever the original trace — the whole reason it is a non-bean).
+- **Consumer lag source** — *Question:* app-side Micrometer lag vs a broker-side exporter. *Decision:* add
+  a broker-side exporter as the truth source, keep app-side as a complement. *Evidence:* app-side
+  `records-lag-max` only covers partitions currently *assigned* to a live consumer and reports zero / drops
+  out when the consumer is down or during rebalance; broker-side tools (kafka-lag-exporter, Burrow, KMinion)
+  read committed group offsets independently so lag is visible even when the consumer is dead — directly the
+  Phase 18 frozen-consumer blind spot. *Rejected:* app-side-only (would have hidden the exact incident this
+  phase exists to surface).
+- **Dashboard method** — *Question:* how to structure the pipeline board. *Decision:* RED (Rate/Errors/
+  Duration), one row per stage in data-flow order, duration as p50/p90/p99, alert on RED symptoms.
+  *Evidence:* RED reports user-facing symptoms (USE reports machine causes); Grafana's guidance puts rate+
+  errors left, duration right, one row per service ordered by data flow, and recommends percentile latency.
+  *Rejected:* USE-only machine dashboards for the pipeline view (cause-side, not symptom-side).
+
+Sources: docs.micrometer.io/micrometer/reference/concepts/timers.html,
+docs.spring.io/spring-kafka/reference/kafka/micrometer.html,
+github.com/seglo/kafka-lag-exporter, baeldung.com/java-kafka-consumer-lag,
+grafana.com/blog/the-red-method-how-to-instrument-your-services/.
 
 ## 10. Suggested Repository Structure
 
