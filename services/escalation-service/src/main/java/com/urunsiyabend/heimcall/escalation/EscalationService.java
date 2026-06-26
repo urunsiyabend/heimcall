@@ -150,6 +150,10 @@ public class EscalationService {
         EscalationIncident incident = incidents.findById(task.getIncidentId()).orElse(null);
         String title = incident != null ? incident.getTitle() : null;
         var severity = incident != null ? incident.getSeverity() : null;
+        // Phase 19 T5: the alert pipeline origin, persisted on the escalation incident as triggeredAt
+        // (= IncidentTriggeredEvent.occurredAt = the alert's occurredAt). Carried into the notification
+        // request so the delivery side can compute true alert→delivered latency.
+        Instant alertOccurredAt = incident != null ? incident.getTriggeredAt() : null;
 
         // Resolve each target to a recipient, tracking how each user was found (USER vs on-call/team).
         List<EscalationRuleTarget> ruleTargets = targets.findByRuleId(task.getRuleId());
@@ -168,7 +172,7 @@ public class EscalationService {
         recipients.forEach((userId, source) -> {
             NotificationRequestedEvent payload = new NotificationRequestedEvent(UUID.randomUUID(), now,
                     task.getOrganizationId(), task.getIncidentId(), task.getPolicyId(), task.getLevel(),
-                    userId, source, title, severity);
+                    userId, source, title, severity, alertOccurredAt);
             outbox.append("escalation", task.getIncidentId().toString(), Topics.NOTIFICATION_REQUESTED,
                     task.getIncidentId().toString(), payload);
         });

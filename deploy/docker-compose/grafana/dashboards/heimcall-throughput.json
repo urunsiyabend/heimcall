@@ -68,14 +68,15 @@
     },
     {
       "id": 12,
-      "title": "Ingest accept latency (s, mean / p-max)",
+      "title": "Ingest accept latency (s, p50/p90/p99)",
       "type": "timeseries",
       "gridPos": { "h": 8, "w": 12, "x": 12, "y": 7 },
       "datasource": { "type": "prometheus", "uid": "prometheus" },
       "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
       "targets": [
-        { "expr": "sum(rate(http_server_requests_seconds_sum{service=\"integration-service\", uri!~\"/actuator.*\"}[1m])) / sum(rate(http_server_requests_seconds_count{service=\"integration-service\", uri!~\"/actuator.*\"}[1m]))", "legendFormat": "mean" },
-        { "expr": "max(http_server_requests_seconds_max{service=\"integration-service\", uri!~\"/actuator.*\"})", "legendFormat": "max" }
+        { "expr": "histogram_quantile(0.50, sum by (le) (rate(http_server_requests_seconds_bucket{service=\"integration-service\", uri!~\"/actuator.*\"}[5m])))", "legendFormat": "p50" },
+        { "expr": "histogram_quantile(0.90, sum by (le) (rate(http_server_requests_seconds_bucket{service=\"integration-service\", uri!~\"/actuator.*\"}[5m])))", "legendFormat": "p90" },
+        { "expr": "histogram_quantile(0.99, sum by (le) (rate(http_server_requests_seconds_bucket{service=\"integration-service\", uri!~\"/actuator.*\"}[5m])))", "legendFormat": "p99" }
       ]
     },
 
@@ -145,7 +146,7 @@
       "id": 41,
       "title": "Escalation task rate (tasks/s)",
       "type": "timeseries",
-      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 34 },
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 34 },
       "datasource": { "type": "prometheus", "uid": "prometheus" },
       "fieldConfig": { "defaults": { "unit": "ops" }, "overrides": [] },
       "targets": [ { "expr": "sum(rate(escalation_task_executed_total{job=\"heimcall\"}[1m]))", "legendFormat": "executed" } ]
@@ -154,12 +155,25 @@
       "id": 42,
       "title": "Notification delivery rate (msg/s)",
       "type": "timeseries",
-      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 34 },
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 34 },
       "datasource": { "type": "prometheus", "uid": "prometheus" },
       "fieldConfig": { "defaults": { "unit": "wps" }, "overrides": [] },
       "targets": [
         { "expr": "sum(rate(notification_delivery_success_total{job=\"heimcall\"}[1m]))", "legendFormat": "success (drain)" },
         { "expr": "sum(rate(notification_delivery_failure_total{job=\"heimcall\"}[1m]))", "legendFormat": "failure" }
+      ]
+    },
+    {
+      "id": 43,
+      "title": "Notification stage latency (s, received→delivered, p50/p90/p99)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 34 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
+      "targets": [
+        { "expr": "histogram_quantile(0.50, sum by (le) (rate(notification_delivery_latency_seconds_bucket{job=\"heimcall\"}[5m])))", "legendFormat": "p50" },
+        { "expr": "histogram_quantile(0.90, sum by (le) (rate(notification_delivery_latency_seconds_bucket{job=\"heimcall\"}[5m])))", "legendFormat": "p90" },
+        { "expr": "histogram_quantile(0.99, sum by (le) (rate(notification_delivery_latency_seconds_bucket{job=\"heimcall\"}[5m])))", "legendFormat": "p99" }
       ]
     },
 
@@ -186,6 +200,38 @@
       "datasource": { "type": "prometheus", "uid": "prometheus" },
       "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
       "targets": [ { "expr": "max by (service, client_id) (kafka_consumer_fetch_manager_records_lag_max{job=\"heimcall\"})", "legendFormat": "{{service}} / {{client_id}}" } ]
+    },
+
+    {
+      "id": 160,
+      "type": "row",
+      "title": "6 · End-to-end  (alert occurredAt → delivered, the full pipeline)",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 51 }
+    },
+    {
+      "id": 61,
+      "title": "End-to-end latency (s, alert→delivered, p50/p90/p99)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 16, "x": 0, "y": 52 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
+      "targets": [
+        { "expr": "histogram_quantile(0.50, sum by (le) (rate(notification_e2e_latency_seconds_bucket{job=\"heimcall\"}[5m])))", "legendFormat": "p50" },
+        { "expr": "histogram_quantile(0.90, sum by (le) (rate(notification_e2e_latency_seconds_bucket{job=\"heimcall\"}[5m])))", "legendFormat": "p90" },
+        { "expr": "histogram_quantile(0.99, sum by (le) (rate(notification_e2e_latency_seconds_bucket{job=\"heimcall\"}[5m])))", "legendFormat": "p99" }
+      ]
+    },
+    {
+      "id": 62,
+      "title": "End-to-end delivered (≈ last 5m / total)",
+      "type": "stat",
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 52 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
+      "targets": [
+        { "expr": "round(sum(increase(notification_e2e_latency_seconds_count{job=\"heimcall\"}[5m])))", "legendFormat": "~5m" },
+        { "expr": "sum(notification_e2e_latency_seconds_count{job=\"heimcall\"})", "legendFormat": "total" }
+      ]
     }
   ],
   "__inputs": [],

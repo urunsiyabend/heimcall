@@ -12,6 +12,7 @@ import com.urunsiyabend.heimcall.notification.sender.NotificationSender;
 import com.urunsiyabend.heimcall.common.outbox.OutboxAppender;
 import io.micrometer.core.instrument.Counter;
 import io.micrometer.core.instrument.MeterRegistry;
+import io.micrometer.core.instrument.Timer;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
@@ -43,6 +44,13 @@ public class DeliveryService {
     // Phase 8 T2: notification_delivery_success_total / notification_delivery_failure_total (terminal only).
     private final Counter deliverySuccess;
     private final Counter deliveryFailure;
+    // Phase 19 T4: time spent in the notification stage — from when this service received the
+    // NotificationRequested event (request.receivedAt) to a successful send. Captures the DeliveryWorker
+    // poll-wait + send cost (the stage-2 serial-poll anti-pattern). Histogram so the board reads p50/90/99.
+    private final Timer deliveryLatency;
+    // Phase 19 T5: true end-to-end latency — the originating alert's occurredAt (threaded through
+    // incident → escalation → notification) to a successful delivery. Histogram for p50/90/99.
+    private final Timer e2eLatency;
 
     public DeliveryService(NotificationDeliveryRepository deliveries, NotificationRequestRepository requests,
                            OutboxAppender outbox, List<NotificationSender> senderList,
@@ -57,6 +65,14 @@ public class DeliveryService {
         this.retryBackoffMs = retryBackoffMs;
         this.deliverySuccess = registry.counter("notification.delivery.success");
         this.deliveryFailure = registry.counter("notification.delivery.failure");
+        this.deliveryLatency = Timer.builder("notification.delivery.latency")
+                .description("notification stage latency: request received -> delivered")
+                .publishPercentileHistogram()
+                .register(registry);
+        this.e2eLatency = Timer.builder("notification.e2e.latency")
+                .description("end-to-end latency: originating alert occurredAt -> delivered")
+                .publishPercentileHistogram()
+                .register(registry);
     }
 
     @Transactional
@@ -88,6 +104,12 @@ public class DeliveryService {
             delivery.markDelivered(now);
             deliveries.save(delivery);
             deliverySuccess.increment();
+            if (request.getReceivedAt() != null) {
+                deliveryLatency.record(java.time.Duration.between(request.getReceivedAt(), now));
+            }
+            if (request.getAlertOccurredAt() != null) {
+                e2eLatency.record(java.time.Duration.between(request.getAlertOccurredAt(), now));
+            }
             outbox.append("notification", delivery.getIncidentId().toString(), Topics.NOTIFICATION_DELIVERED,
                     delivery.getIncidentId().toString(),
                     new NotificationDeliveredEvent(UUID.randomUUID(), now, delivery.getOrganizationId(),

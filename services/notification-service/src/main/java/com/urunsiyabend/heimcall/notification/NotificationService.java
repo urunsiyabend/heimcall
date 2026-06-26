@@ -52,7 +52,8 @@ public class NotificationService {
 
         Instant now = Instant.now();
         requests.save(NotificationRequest.of(event.eventId(), event.organizationId(), event.incidentId(),
-                event.targetUserId(), event.level(), event.targetSource(), event.title(), event.severity(), now));
+                event.targetUserId(), event.level(), event.targetSource(), event.title(), event.severity(), now,
+                event.alertOccurredAt()));
 
         List<ContactMethod> enabled = contactMethods.findByOrganizationIdAndUserIdAndEnabledTrue(
                 event.organizationId(), event.targetUserId());

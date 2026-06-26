@@ -30,7 +30,10 @@ public class TracingDefaultsEnvironmentPostProcessor implements EnvironmentPostP
         Map<String, Object> defaults = Map.of(
                 "management.tracing.sampling.probability", "1.0",
                 "management.otlp.tracing.endpoint",
-                "${OTLP_TRACES_ENDPOINT:http://localhost:4318/v1/traces}");
+                "${OTLP_TRACES_ENDPOINT:http://localhost:4318/v1/traces}",
+                // Phase 19 T4: publish histogram buckets for HTTP server timings so the throughput board can
+                // read true p50/p90/p99 (histogram_quantile) instead of only the mean. Fleet-wide; cheap.
+                "management.metrics.distribution.percentiles-histogram.http.server.requests", "true");
         // addLast: lowest precedence — real config and env vars win over these defaults.
         environment.getPropertySources().addLast(new MapPropertySource(SOURCE_NAME, defaults));
     }

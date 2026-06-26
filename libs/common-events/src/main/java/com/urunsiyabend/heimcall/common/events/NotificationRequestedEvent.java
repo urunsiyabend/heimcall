@@ -19,6 +19,11 @@ import java.util.UUID;
  * @param targetSource       how the recipient was resolved: USER, SCHEDULE, or TEAM
  * @param title              incident title (notification subject)
  * @param severity           incident severity
+ * @param alertOccurredAt    pipeline origin — the originating alert's occurredAt, threaded through
+ *                           incident (IncidentTriggeredEvent.occurredAt) and escalation
+ *                           (EscalationIncident.triggeredAt) so notification-service can record true
+ *                           end-to-end alert→delivered latency (Phase 19 T5). Nullable: an in-flight
+ *                           pre-T5 message has none, and the e2e timer skips it.
  */
 public record NotificationRequestedEvent(
         UUID eventId,
@@ -30,6 +35,7 @@ public record NotificationRequestedEvent(
         UUID targetUserId,
         String targetSource,
         String title,
-        Severity severity
+        Severity severity,
+        Instant alertOccurredAt
 ) {
 }

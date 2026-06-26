@@ -48,12 +48,18 @@ public class NotificationRequest {
     @Column(name = "received_at", nullable = false)
     private Instant receivedAt;
 
+    // Phase 19 T5: pipeline origin (the originating alert's occurredAt) for end-to-end alert→delivered
+    // latency. Nullable — a pre-T5 in-flight request carries none.
+    @Column(name = "alert_occurred_at")
+    private Instant alertOccurredAt;
+
     protected NotificationRequest() {
     }
 
     public static NotificationRequest of(UUID eventId, UUID organizationId, UUID incidentId,
                                          UUID recipientUserId, int level, String targetSource,
-                                         String title, Severity severity, Instant receivedAt) {
+                                         String title, Severity severity, Instant receivedAt,
+                                         Instant alertOccurredAt) {
         NotificationRequest r = new NotificationRequest();
         r.eventId = eventId;
         r.organizationId = organizationId;
@@ -64,6 +70,7 @@ public class NotificationRequest {
         r.title = title;
         r.severity = severity;
         r.receivedAt = receivedAt;
+        r.alertOccurredAt = alertOccurredAt;
         return r;
     }
 
@@ -101,5 +108,9 @@ public class NotificationRequest {
 
     public Instant getReceivedAt() {
         return receivedAt;
+    }
+
+    public Instant getAlertOccurredAt() {
+        return alertOccurredAt;
     }
 }

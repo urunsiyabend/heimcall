@@ -56,7 +56,7 @@ class NotificationServiceTest {
 
     private NotificationRequestedEvent request(UUID eventId) {
         return new NotificationRequestedEvent(eventId, Instant.now(), ORG, UUID.randomUUID(), UUID.randomUUID(),
-                1, USER, "USER", "boom", Severity.CRITICAL);
+                1, USER, "USER", "boom", Severity.CRITICAL, Instant.now());
     }
 
     private ContactMethod contact(NotificationChannel channel, String destination) {
