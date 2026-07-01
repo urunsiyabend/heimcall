@@ -4,6 +4,9 @@ package com.urunsiyabend.heimcall.notification.domain;
 public enum DeliveryStatus {
     /** Not yet delivered; eligible for the worker once next_attempt_at passes. */
     PENDING,
+    /** Claimed and in-flight: leased to one sender (lease_token + lease_expires_at), sending outside the
+     * transaction. An expired lease makes it re-claimable (crashed worker) — see Phase 20 T1. */
+    SENDING,
     /** Successfully delivered through the channel. Terminal. */
     DELIVERED,
     /** Gave up after exhausting bounded retries. Terminal. */

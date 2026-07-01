@@ -48,9 +48,16 @@ public class WebhookSender implements NotificationSender {
         payload.put("severity", request.getSeverity() != null ? request.getSeverity().name() : null);
         payload.put("organizationId", request.getOrganizationId());
 
+        // Phase 20 T1: best-effort dedup handle for the receiver. delivery.getId() is stable across this
+        // delivery's retry attempts, so a receiver that honors it can drop a duplicate caused by the
+        // at-least-once send (a send that succeeded but whose result we failed to record → re-sent).
+        // Heimcall does not depend on the receiver honoring it (most arbitrary webhooks won't).
+        String deliveryId = delivery.getId().toString();
         restClient.post()
                 .uri(delivery.getDestination())
                 .contentType(MediaType.APPLICATION_JSON)
+                .header("Idempotency-Key", deliveryId)
+                .header("X-Delivery-Id", deliveryId)
                 .body(payload)
                 .retrieve()
                 .toBodilessEntity();

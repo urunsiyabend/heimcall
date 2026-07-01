@@ -1,15 +1,10 @@
 package com.urunsiyabend.heimcall.notification;
 
-import com.urunsiyabend.heimcall.common.events.NotificationDeliveredEvent;
-import com.urunsiyabend.heimcall.common.events.NotificationFailedEvent;
-import com.urunsiyabend.heimcall.common.events.Topics;
 import com.urunsiyabend.heimcall.notification.domain.NotificationChannel;
 import com.urunsiyabend.heimcall.notification.domain.NotificationDelivery;
-import com.urunsiyabend.heimcall.notification.domain.NotificationDeliveryRepository;
 import com.urunsiyabend.heimcall.notification.domain.NotificationRequest;
 import com.urunsiyabend.heimcall.notification.domain.NotificationRequestRepository;
 import com.urunsiyabend.heimcall.notification.sender.NotificationSender;
-import com.urunsiyabend.heimcall.common.outbox.OutboxAppender;
 import io.micrometer.core.instrument.Counter;
 import io.micrometer.core.instrument.MeterRegistry;
 import io.micrometer.core.instrument.Timer;
@@ -17,8 +12,8 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
-import org.springframework.transaction.annotation.Transactional;
 
+import java.time.Duration;
 import java.time.Instant;
 import java.util.EnumMap;
 import java.util.List;
@@ -26,43 +21,47 @@ import java.util.Map;
 import java.util.UUID;
 
 /**
- * Fires one delivery in its own transaction: dispatch through the channel's sender, then either mark
- * DELIVERED (and publish {@code notification.delivered.v1}) or, on failure, retry with backoff up to
- * the configured max attempts before marking FAILED (and publishing {@code notification.failed.v1}).
+ * Phase 20 T1: the un-transactional half of the two-phase delivery worker. {@link #claim} delegates the
+ * SENDING+lease flip to {@link DeliveryTx} (a committed transaction), then {@link #sendClaimed} performs
+ * the actual SMTP/webhook send <b>outside</b> any transaction (no row lock, no DB connection held) and
+ * records the result back through {@code DeliveryTx}. Because the send is lock-free, a pool of
+ * {@link DeliveryDispatcher} virtual threads can run many sends concurrently — the throughput fix (the old
+ * single-thread send-in-tx worker capped at ~87/s).
+ *
+ * <p>On success → DELIVERED + {@code notification.delivered.v1}; on failure → linear backoff retry
+ * ({@code attempts × backoff}) up to {@code max-attempts}, then FAILED + {@code notification.failed.v1}.
+ * Metrics increment only when {@code DeliveryTx} confirms this worker still owned the lease (fencing).
  */
 @Service
 public class DeliveryService {
 
     private static final Logger log = LoggerFactory.getLogger(DeliveryService.class);
 
-    private final NotificationDeliveryRepository deliveries;
+    private final DeliveryTx tx;
     private final NotificationRequestRepository requests;
-    private final OutboxAppender outbox;
     private final Map<NotificationChannel, NotificationSender> senders = new EnumMap<>(NotificationChannel.class);
     private final int maxAttempts;
     private final long retryBackoffMs;
+    private final Duration lease;
     // Phase 8 T2: notification_delivery_success_total / notification_delivery_failure_total (terminal only).
     private final Counter deliverySuccess;
     private final Counter deliveryFailure;
-    // Phase 19 T4: time spent in the notification stage — from when this service received the
-    // NotificationRequested event (request.receivedAt) to a successful send. Captures the DeliveryWorker
-    // poll-wait + send cost (the stage-2 serial-poll anti-pattern). Histogram so the board reads p50/90/99.
+    // Phase 19 T4: notification stage latency (request received -> delivered). Histogram for p50/90/99.
     private final Timer deliveryLatency;
-    // Phase 19 T5: true end-to-end latency — the originating alert's occurredAt (threaded through
-    // incident → escalation → notification) to a successful delivery. Histogram for p50/90/99.
+    // Phase 19 T5: true end-to-end latency (originating alert occurredAt -> delivered). Histogram.
     private final Timer e2eLatency;
 
-    public DeliveryService(NotificationDeliveryRepository deliveries, NotificationRequestRepository requests,
-                           OutboxAppender outbox, List<NotificationSender> senderList,
-                           MeterRegistry registry,
+    public DeliveryService(DeliveryTx tx, NotificationRequestRepository requests,
+                           List<NotificationSender> senderList, MeterRegistry registry,
                            @Value("${notification.delivery.max-attempts:3}") int maxAttempts,
-                           @Value("${notification.delivery.retry-backoff-ms:10000}") long retryBackoffMs) {
-        this.deliveries = deliveries;
+                           @Value("${notification.delivery.retry-backoff-ms:10000}") long retryBackoffMs,
+                           @Value("${notification.delivery.lease-ms:60000}") long leaseMs) {
+        this.tx = tx;
         this.requests = requests;
-        this.outbox = outbox;
         senderList.forEach(s -> senders.put(s.channel(), s));
         this.maxAttempts = maxAttempts;
         this.retryBackoffMs = retryBackoffMs;
+        this.lease = Duration.ofMillis(leaseMs);
         this.deliverySuccess = registry.counter("notification.delivery.success");
         this.deliveryFailure = registry.counter("notification.delivery.failure");
         this.deliveryLatency = Timer.builder("notification.delivery.latency")
@@ -75,73 +74,70 @@ public class DeliveryService {
                 .register(registry);
     }
 
-    @Transactional
-    public void fireDelivery(UUID deliveryId) {
-        // Claim the delivery under a row lock (FOR UPDATE SKIP LOCKED): empty means another worker/replica
-        // already sent it or is sending it now, so skip — prevents sending the same email/webhook twice
-        // across replicas. The lock is held until this tx commits the DELIVERED/FAILED/retry mark.
-        NotificationDelivery delivery = deliveries.findPendingForUpdate(deliveryId).orElse(null);
-        if (delivery == null) {
-            return;
-        }
-        NotificationRequest request = requests.findById(delivery.getRequestEventId()).orElse(null);
+    /** Phase 1: claim up to {@code limit} due rows (each returned SENDING with its lease stamped). */
+    public List<NotificationDelivery> claim(int limit) {
+        return tx.claimDue(Instant.now(), limit, lease);
+    }
+
+    /**
+     * Phase 2: send one already-claimed delivery (status SENDING, lease held) outside any transaction, then
+     * record the result through {@link DeliveryTx} under the fencing-token guard. Safe to call concurrently
+     * for distinct claimed rows.
+     */
+    public void sendClaimed(NotificationDelivery claimed) {
+        UUID id = claimed.getId();
+        UUID token = claimed.getLeaseToken();
+
+        NotificationRequest request = requests.findById(claimed.getRequestEventId()).orElse(null);
         if (request == null) {
-            log.warn("Delivery {} has no request {}; marking failed", deliveryId, delivery.getRequestEventId());
-            failAndPublish(delivery, "notification request not found", Instant.now());
+            log.warn("Delivery {} has no request {}; marking failed", id, claimed.getRequestEventId());
+            failTerminal(id, token, "notification request not found");
             return;
         }
 
-        NotificationSender sender = senders.get(delivery.getChannel());
-        Instant now = Instant.now();
+        NotificationSender sender = senders.get(claimed.getChannel());
         if (sender == null) {
             // Unknown channel cannot succeed; do not waste retries on it.
-            failAndPublish(delivery, "no sender for channel " + delivery.getChannel(), now);
+            failTerminal(id, token, "no sender for channel " + claimed.getChannel());
             return;
         }
 
         try {
-            sender.send(delivery, request);
-            delivery.markDelivered(now);
-            deliveries.save(delivery);
-            deliverySuccess.increment();
-            if (request.getReceivedAt() != null) {
-                deliveryLatency.record(java.time.Duration.between(request.getReceivedAt(), now));
+            sender.send(claimed, request);
+            Instant now = Instant.now();
+            if (tx.finalizeDelivered(id, token, now)) {
+                deliverySuccess.increment();
+                if (request.getReceivedAt() != null) {
+                    deliveryLatency.record(Duration.between(request.getReceivedAt(), now));
+                }
+                if (request.getAlertOccurredAt() != null) {
+                    e2eLatency.record(Duration.between(request.getAlertOccurredAt(), now));
+                }
+                log.info("Delivered notification {} via {} to {} (incident {})",
+                        id, claimed.getChannel(), claimed.getDestination(), claimed.getIncidentId());
             }
-            if (request.getAlertOccurredAt() != null) {
-                e2eLatency.record(java.time.Duration.between(request.getAlertOccurredAt(), now));
-            }
-            outbox.append("notification", delivery.getIncidentId().toString(), Topics.NOTIFICATION_DELIVERED,
-                    delivery.getIncidentId().toString(),
-                    new NotificationDeliveredEvent(UUID.randomUUID(), now, delivery.getOrganizationId(),
-                            delivery.getIncidentId(), delivery.getRecipientUserId(), delivery.getChannel().name(),
-                            delivery.getDestination(), delivery.getRequestEventId()));
-            log.info("Delivered notification {} via {} to {} (incident {})",
-                    deliveryId, delivery.getChannel(), delivery.getDestination(), delivery.getIncidentId());
         } catch (Exception e) {
             String reason = e.getMessage() != null ? e.getMessage() : e.getClass().getSimpleName();
-            int attemptJustMade = delivery.getAttempts() + 1;
+            Instant now = Instant.now();
+            int attemptJustMade = claimed.getAttempts() + 1;
             if (attemptJustMade >= maxAttempts) {
-                failAndPublish(delivery, reason, now);
+                if (tx.finalizeFailure(id, token, reason, now)) {
+                    deliveryFailure.increment();
+                }
                 log.warn("Delivery {} failed permanently after {} attempt(s) via {}: {}",
-                        deliveryId, attemptJustMade, delivery.getChannel(), reason);
+                        id, attemptJustMade, claimed.getChannel(), reason);
             } else {
                 Instant next = now.plusMillis((long) attemptJustMade * retryBackoffMs);
-                delivery.markRetry(reason, next, now);
-                deliveries.save(delivery);
+                tx.finalizeRetry(id, token, reason, next, now);
                 log.warn("Delivery {} attempt {} failed via {}, retrying at {}: {}",
-                        deliveryId, attemptJustMade, delivery.getChannel(), next, reason);
+                        id, attemptJustMade, claimed.getChannel(), next, reason);
             }
         }
     }
 
-    private void failAndPublish(NotificationDelivery delivery, String reason, Instant now) {
-        delivery.markFailed(reason, now);
-        deliveries.save(delivery);
-        deliveryFailure.increment();
-        outbox.append("notification", delivery.getIncidentId().toString(), Topics.NOTIFICATION_FAILED,
-                delivery.getIncidentId().toString(),
-                new NotificationFailedEvent(UUID.randomUUID(), now, delivery.getOrganizationId(),
-                        delivery.getIncidentId(), delivery.getRecipientUserId(), delivery.getChannel().name(),
-                        delivery.getDestination(), delivery.getAttempts(), reason, delivery.getRequestEventId()));
+    private void failTerminal(UUID id, UUID token, String reason) {
+        if (tx.finalizeFailure(id, token, reason, Instant.now())) {
+            deliveryFailure.increment();
+        }
     }
 }

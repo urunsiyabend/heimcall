@@ -2203,6 +2203,147 @@ docs.spring.io/spring-kafka/reference/kafka/micrometer.html,
 github.com/seglo/kafka-lag-exporter, baeldung.com/java-kafka-consumer-lag,
 grafana.com/blog/the-red-method-how-to-instrument-your-services/.
 
+## Phase 20 - Notification Delivery Throughput (parallel delivery worker) (measured 2026-06-26)
+
+Goal: with Phase 19 making the pipeline measurable, the 2026-06-26 load run pinpoints the **single
+narrowest stage**: notification delivery at **~87 msg/s** while every upstream stage sustains ~670/s.
+Re-architect the `DeliveryWorker` from a serial single-thread poll into a **concurrent sender**, without
+weakening the at-least-once delivery guarantee. Measurement-led: every ticket cites a number from the run.
+
+### Measured baseline (local fleet, 8 bootJars, CPU governor=performance, 20 keys, k6 ramp→3000 RPS, Phase 19 metrics off Prometheus)
+
+| Stage | Metric source | Measured | Verdict |
+| --- | --- | --- | --- |
+| A ingest accept | k6 `alerts_accepted` | **~100/s** (93.7% of 3000 RPS → 429) | gateway token bucket (20 keys × replenish 5/s) — configured cap, not capacity |
+| A integration relay | `rate(outbox_published_total{topic="alert.received.v1"})` | ~667/s | fine |
+| B incident consume | KMinion lag `alert.received.v1` | kept 100/s, lag spiked 3700→0 | fine @100/s; **1 partition → no parallelism** |
+| B/C incident + escalation relay | `rate(outbox_published_total)` | **666.7/s** (escalation, measured) | fine; backlog under load was burst-driven (round-1+round-2 task waves), drains at 640/s |
+| D **notification delivery** | `rate(notification_delivery_success_total)` | **86.6/s** saturated | ⛔ **bottleneck** |
+| e2e latency | `notification_e2e_latency_seconds` | avg ~80s under load; histogram **pinned at 30s max bucket** (tail invisible) | latency dominated by delivery queueing |
+
+Root cause (`DeliveryWorker.java`): `@Scheduled(fixedDelay 5s)` iterating due rows in a **serial `for`
+loop**, each `fireDelivery` doing the SMTP/webhook send **inside the tx + `FOR UPDATE SKIP LOCKED` row
+lock**. The `notification.requested.v1` consumer runs concurrency=4 (Phase 18 T3) so delivery *rows* are
+created in parallel — but the **sender is serial**, so that parallelism dies at the send. Amplification
+makes it worse: 1 incident → **2** `notification.requested` (repeat_count=1 = 2 rounds) → 2 deliveries, so
+even the throttled 100 incidents/s demands ~200 deliveries/s against an 87/s ceiling (~2.3× overload).
+
+### Design decisions (locked 2026-06-26, research-driven — see Research notes below)
+
+- **T1 = two-phase claim + concurrent senders. The concurrency is the throughput lever; two-phase is the
+  safety prerequisite — not optional, and not the win on its own.** Two-phase alone, still single-threaded,
+  is still ~87/s. Claim flips `PENDING → SENDING` (committing fast, releasing the row lock), the slow send
+  runs **outside** the tx, and a final state update commits the result. Only because the send is lock-free
+  can a pool of senders run in parallel without serializing on row locks / exhausting the DB pool.
+- **Concurrency model = virtual-thread executor + semaphore cap** (Java 21, sends are IO-bound). Cap via
+  `notification.delivery.concurrency` (default ~16; real prod cap is the email/SMS provider rate limit, not
+  our threads). Hikari is fine because two-phase holds a DB connection only at claim + ack (ms), never
+  across the send. VT pinning is a non-issue here precisely because no JDBC is held across the blocking IO.
+  Platform fixed-pool is the documented fallback if JavaMail's internal `synchronized` ever pins materially.
+- **at-least-once is preserved by lease + reaper — concurrency changes the *duplicate* rate, not the *loss*
+  guarantee** (the guarantee is per-row, independent of in-flight count). Invariants that must hold:
+  (1) `SENDING` is **never** written without `lease_expires_at` in the same commit (a leaseless SENDING row
+  = orphan = loss); (2) claim = `SKIP LOCKED` + atomic flip, committed before send; (3) reaper / claim
+  predicate reclaims expired SENDING (`status='PENDING' OR (status='SENDING' AND lease_expires_at < now)`);
+  (4) final ack gated on `lease_token` (fencing) so a revived zombie worker cannot overwrite a row the new
+  owner re-claimed; (5) shutdown leaves in-flight rows `SENDING` (never `FAILED`) so the reaper recovers them.
+- **Claim-on-demand, not batch-claim-then-queue.** Each free permit claims exactly one row and sends it, so
+  the lease only has to cover one real send. Batch-claiming N rows to `SENDING` and parking them in a bounded
+  queue would let the lease expire *while queued* → needless reclaim → self-inflicted duplicate.
+- **Lease ≥ p99 send + webhook timeout (5s) + GC/scheduler slack** — *not* `timeout + 1s`. A too-short lease
+  expiring while the first worker is still mid-send lets a second worker fire in parallel = guaranteed
+  duplicate. (Heartbeat/lease-renewal is the deferred evolution if send latency gets highly variable.)
+- **Duplicate outbound notification is the accepted at-least-once cost.** Send a best-effort `X-Delivery-Id`
+  header (helps receivers that dedupe) but do **not** architect around receiver idempotency: Heimcall pushes
+  to *uncontrolled customer webhooks* + SMTP, which mostly won't honor an `Idempotency-Key`. Redis cooldown
+  (Phase 14) already coalesces repeat pages per `incident+user+channel`, bounding user-visible dup pages.
+- **Reject the "eventual delivery / DLQ-as-graveyard" framing for paging.** A page delivered 10 min late is
+  useless; bounded attempts → `FAILED` → escalate to the next target/level is the *correct* incident-mgmt
+  behavior, and Heimcall already does it (max-attempts + escalation repeat rounds/levels). Keep it.
+- **No "delivery row in the same tx as the incident."** That is a single-DB monolith pattern; Heimcall is
+  database-per-service. The cross-service durability already exists (incident outbox → Kafka → escalation
+  outbox → Kafka → notification consumer) and the inbox dedup already exists (`notification_request` PK =
+  request eventId). Nothing to add there.
+
+### Ticket breakdown
+
+- **T1 (DONE) - Parallel delivery worker (primary).** Schema (Flyway `V4`): added `lease_token`,
+  `lease_expires_at` to `notification_delivery` (+ `SENDING` status) + partial index on `next_attempt_at`
+  `WHERE status IN ('PENDING','SENDING')`. The serial `@Scheduled` `DeliveryWorker` (send-in-tx, ~87/s) was
+  replaced by a two-phase design across three beans:
+  - `NotificationDeliveryRepository.claimDue` — `SELECT … WHERE next_attempt_at <= :now AND (status='PENDING'
+    OR (status='SENDING' AND lease_expires_at < :now)) ORDER BY next_attempt_at FOR UPDATE SKIP LOCKED LIMIT
+    :limit`. The expired-`SENDING` arm is the reaper (no separate scheduler); `findByIdForUpdate` re-locks by
+    id for the result write.
+  - `DeliveryTx` (transactional) — `claimDue` flips rows → `SENDING` + fresh `lease_token`/`lease_expires_at`
+    and commits (releasing the row lock); `finalizeDelivered`/`finalizeRetry`/`finalizeFailure` re-lock by id
+    and apply the result **only if `lease_token` still matches** (fencing) — a zombie worker whose lease was
+    reaped returns `false` and cannot clobber the new owner. Its own bean so the un-transactional orchestration
+    reaches it through the Spring proxy.
+  - `DeliveryService.sendClaimed` (un-transactional) — SMTP/webhook send **outside** any tx (no lock, no DB
+    connection held), then records via `DeliveryTx`; metrics increment only on a won fencing check.
+  - `DeliveryDispatcher` — dedicated loop thread + `Executors.newVirtualThreadPerTaskExecutor()` capped by
+    `Semaphore(notification.delivery.concurrency)`, **claim-on-demand** (claims only as many rows as free
+    permits — no batch-then-queue lease-expiry bug). `@PreDestroy` leaves in-flight rows `SENDING` (lease
+    recovers them). Config: `concurrency` (16), `lease-ms` (60000), `idle-sleep-ms` (500). `WebhookSender`
+    sends a best-effort `X-Delivery-Id`/`Idempotency-Key` header (stable across retries) for receiver dedup.
+  - **Verified (2026-07-01):** unit `DeliveryServiceTest` (7) + `NotificationServiceTest` (4) + PG
+    `NotificationDeliveryClaimTest` (2: exactly-one-claimer via SKIP LOCKED, expired-lease reclaim). **Load
+    (isolated delivery stage — seeded 8000 PENDING webhook deliveries + local sink):** peak **1246/s**,
+    sustained ~1000/s, 8000 drained in ~9s, 0 failed — **~14× the 87/s serial baseline** (at `powersave`
+    governor, so conservative). **Chaos:** `kill -9` mid-drain caught 11 rows `SENDING`; on restart all
+    reclaimed via lease expiry → **8000/8000 DELIVERED, 0 FAILED, 0 lost** — at-least-once holds across a hard
+    crash. Note: the delivery stage was loaded directly, not through the full k6 pipeline, because the gateway
+    rate-limit caps the pipeline at ~100/s (T4) — it cannot exercise delivery at 600/s. e2e-latency-off-30s is
+    T3 (the histogram bucket ceiling is a separate, still-open item).
+- **T2 - Partition the remaining single-partition topics.** `alert.received.v1` + `incident.lifecycle.v1`
+  are still `PartitionCount=1` (Phase 18 T3 only did `notification.requested.v1`) → incident/escalation
+  consumers cannot scale horizontally; the next ceiling once delivery is unlocked and the gateway cap is
+  raised. Provision N partitions **at creation** (`NewTopic` bean), key = the existing ordering key
+  (`alert.received.v1` by org/dedupKey, `incident.lifecycle.v1` by incidentId), raise consumer concurrency
+  to match. Never live-ALTER a keyed topic (rehashes keys, breaks order) — fresh envs get N from the bean;
+  dev ALTER caveat documented (as in Phase 18 T3). Acceptance: incident-consume rate scales past 100/s.
+- **T3 - Extend latency histogram buckets.** The `notification_delivery_latency` + `notification_e2e_latency`
+  histograms max out at 30s, so p95/p99 were pinned and the real tail (avg ~80s under load) was invisible.
+  Add SLO-driven buckets out to the latencies the system actually hits. Acceptance: tail quantiles read true
+  values under load, not the ceiling.
+- **T4 - Gateway rate-limit review.** The per-key token bucket (20 keys × replenish 5/s = ~100/s) is the
+  first wall *and* currently below delivery demand. Document it as the deliberate first ceiling; consider
+  per-org vs per-key keying and env-driven defaults so a load run can exercise the chain past 100/s.
+  Acceptance: documented; defaults tunable for load runs without code change.
+
+### Research notes (researched 2026-06-26)
+
+- **Two-phase delivery + lease vs send-in-tx** — *Decision:* claim `→SENDING` with a lease, send outside the
+  tx, ack gated on a fencing `lease_token`; reaper reclaims expired SENDING. *Evidence:* this is the
+  in-DB form of a work-queue **visibility timeout** — SQS makes a claimed-but-unacked message visible again
+  after the timeout so a crashed worker's message is never lost (at the cost of possible redelivery);
+  Temporal documents the same crash/timeout window (external Activity succeeds but the worker dies before
+  recording the result → it re-runs, so the callee must dedupe). The fencing token is the standard guard
+  against a revived zombie worker mutating state it no longer owns. *Rejected:* keeping send-in-tx (holds
+  the row lock + DB connection across a ~5s SMTP → cannot parallelize, the measured 87/s ceiling).
+- **at-least-once vs exactly-once for SMTP/webhook** — *Decision:* target at-least-once + make duplicates
+  cheap (best-effort `X-Delivery-Id`, Redis cooldown coalescing); do not chase exactly-once. *Evidence:*
+  SMTP/arbitrary webhooks cannot enlist in the local DB tx, so the send-succeeds-then-crash-before-ack
+  window is unavoidable; payment APIs (Stripe/Square) solve their side with an `Idempotency-Key` the
+  *caller* sends and the *provider* persists — but Heimcall is the *sender* to *uncontrolled* receivers, so
+  that lever is best-effort only here. *Rejected:* depending on receiver idempotency for correctness;
+  same-tx delivery insert (cross-service, impossible under DB-per-service — and already solved by the
+  outbox+inbox chain).
+- **Concurrency mechanism** — *Decision:* virtual-thread executor + semaphore cap. *Evidence:* sends are
+  IO-bound (SMTP/HTTP wait), the ideal VT workload on Java 21; two-phase removes the JDBC-held-across-IO case
+  that causes carrier-thread pinning. *Rejected:* fixed platform-thread pool as default (kept as fallback if
+  JavaMail `synchronized` pins materially); raising *consumer* concurrency further (it creates rows, not the
+  send bottleneck).
+- **Retry policy for paging** — *Decision:* bounded attempts → FAILED → escalate (existing behavior). 
+  *Evidence:* incident paging values timeliness over eventual delivery — a late page is useless, and the
+  escalation engine already provides the "try the next target" path. *Rejected:* infinite retry / DLQ-as-
+  graveyard (a batch-job mindset; wrong for time-critical paging).
+
+Sources: docs.aws.amazon.com/AWSSimpleQueueService/latest/SQSDeveloperGuide/sqs-visibility-timeout.html,
+docs.temporal.io/activity-definition, docs.aws.amazon.com/prescriptive-guidance/latest/cloud-design-patterns/transactional-outbox.html,
+docs.stripe.com/api/idempotent_requests, docs.oracle.com/en/java/javase/21/core/virtual-threads.html.
+
 ## 10. Suggested Repository Structure
 
 ```text

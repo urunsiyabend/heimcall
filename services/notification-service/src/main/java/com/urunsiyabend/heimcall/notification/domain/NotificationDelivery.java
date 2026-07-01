@@ -60,6 +60,14 @@ public class NotificationDelivery {
     @Column(name = "last_attempt_at")
     private Instant lastAttemptAt;
 
+    // Phase 20 T1: two-phase claim lease. Set when claimed (status SENDING), cleared on any terminal/retry
+    // transition. lease_token is a fencing token — the result write only applies while it still matches.
+    @Column(name = "lease_token")
+    private UUID leaseToken;
+
+    @Column(name = "lease_expires_at")
+    private Instant leaseExpiresAt;
+
     @Column(name = "created_at", nullable = false)
     private Instant createdAt;
 
@@ -89,20 +97,37 @@ public class NotificationDelivery {
         return d;
     }
 
+    /**
+     * Phase 20 T1: claim this row for sending — flip PENDING (or an expired-lease SENDING) to SENDING and
+     * stamp the lease. Does NOT touch {@code attempts}; the attempt is counted only when the send result
+     * is recorded. After the claim tx commits the row lock is released and the send runs outside it.
+     */
+    public void claim(UUID leaseToken, Instant leaseExpiresAt, Instant now) {
+        this.status = DeliveryStatus.SENDING;
+        this.leaseToken = leaseToken;
+        this.leaseExpiresAt = leaseExpiresAt;
+        this.updatedAt = now;
+    }
+
     public void markDelivered(Instant now) {
         this.status = DeliveryStatus.DELIVERED;
         this.attempts++;
         this.lastError = null;
         this.lastAttemptAt = now;
+        this.leaseToken = null;
+        this.leaseExpiresAt = null;
         this.updatedAt = now;
     }
 
-    /** Record a failed attempt and schedule the next one. */
+    /** Record a failed attempt and schedule the next one — back to PENDING, lease released. */
     public void markRetry(String error, Instant nextAttemptAt, Instant now) {
+        this.status = DeliveryStatus.PENDING;
         this.attempts++;
         this.lastError = error;
         this.lastAttemptAt = now;
         this.nextAttemptAt = nextAttemptAt;
+        this.leaseToken = null;
+        this.leaseExpiresAt = null;
         this.updatedAt = now;
     }
 
@@ -111,6 +136,8 @@ public class NotificationDelivery {
         this.attempts++;
         this.lastError = error;
         this.lastAttemptAt = now;
+        this.leaseToken = null;
+        this.leaseExpiresAt = null;
         this.updatedAt = now;
     }
 
@@ -172,5 +199,13 @@ public class NotificationDelivery {
 
     public Instant getUpdatedAt() {
         return updatedAt;
+    }
+
+    public UUID getLeaseToken() {
+        return leaseToken;
+    }
+
+    public Instant getLeaseExpiresAt() {
+        return leaseExpiresAt;
     }
 }

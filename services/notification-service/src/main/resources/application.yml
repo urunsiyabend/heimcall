@@ -75,7 +75,15 @@ notification:
     timeout-ms: ${NOTIFICATION_WEBHOOK_TIMEOUT_MS:5000}
   # Delivery worker + bounded-retry policy.
   delivery:
-    poll-interval-ms: ${NOTIFICATION_POLL_INTERVAL_MS:5000}
+    # Phase 20 T1: concurrent sender pool size (virtual threads). In-flight sends never exceed this; the
+    # real prod ceiling is the email/SMS provider rate limit, not the thread count.
+    concurrency: ${NOTIFICATION_DELIVERY_CONCURRENCY:16}
+    # Lease held on a claimed (SENDING) row. Must comfortably exceed a single send (webhook timeout 5s) +
+    # GC/scheduler slack so the lease never expires while the owning worker is still sending (which would
+    # let a second worker double-send). Expired-lease rows are re-claimed (crash recovery).
+    lease-ms: ${NOTIFICATION_DELIVERY_LEASE_MS:60000}
+    # Dispatcher backoff when nothing is due.
+    idle-sleep-ms: ${NOTIFICATION_DELIVERY_IDLE_SLEEP_MS:500}
     max-attempts: ${NOTIFICATION_MAX_ATTEMPTS:3}
     # Backoff before the next attempt = attempts * this (ms).
     retry-backoff-ms: ${NOTIFICATION_RETRY_BACKOFF_MS:10000}

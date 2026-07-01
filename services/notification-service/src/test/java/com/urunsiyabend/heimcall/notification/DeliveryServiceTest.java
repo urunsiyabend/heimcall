@@ -1,19 +1,14 @@
 package com.urunsiyabend.heimcall.notification;
 
-import com.urunsiyabend.heimcall.common.events.NotificationDeliveredEvent;
-import com.urunsiyabend.heimcall.common.events.NotificationFailedEvent;
-import com.urunsiyabend.heimcall.common.events.Topics;
-import com.urunsiyabend.heimcall.common.outbox.OutboxAppender;
-import com.urunsiyabend.heimcall.notification.domain.DeliveryStatus;
 import com.urunsiyabend.heimcall.notification.domain.NotificationChannel;
 import com.urunsiyabend.heimcall.notification.domain.NotificationDelivery;
-import com.urunsiyabend.heimcall.notification.domain.NotificationDeliveryRepository;
 import com.urunsiyabend.heimcall.notification.domain.NotificationRequest;
 import com.urunsiyabend.heimcall.notification.domain.NotificationRequestRepository;
 import com.urunsiyabend.heimcall.notification.sender.NotificationSender;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
@@ -29,38 +24,44 @@ import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
-import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 /**
- * Phase 13 T4: notification delivery firing ({@link DeliveryService}) — the retry/backoff decision
- * (linear `attempts × backoff`, terminal FAILED at `max-attempts`), success/failure event + counter
- * side-effects, and the claim-empty / no-sender / missing-request guards. Pure Mockito (a real
- * {@link SimpleMeterRegistry}); the lock-safe claim is proven against real PG in
- * {@code NotificationDeliveryClaimTest}.
+ * Phase 20 T1: notification delivery sending ({@link DeliveryService#sendClaimed}) — the retry/backoff
+ * decision (linear {@code attempts × backoff}, terminal FAILED at {@code max-attempts}), the
+ * success/failure counters, the missing-request / no-sender guards, and the fencing guard (when
+ * {@link DeliveryTx} reports the lease was lost, no metric is recorded). Pure Mockito; {@code DeliveryTx}
+ * is mocked so the un-transactional send path is tested in isolation. The two-phase claim's
+ * exactly-one-claimer / lease semantics are proven against real PG in {@code NotificationDeliveryClaimTest}.
  */
 @ExtendWith(MockitoExtension.class)
 class DeliveryServiceTest {
 
     private static final long BACKOFF = 10_000L;
     private static final int MAX_ATTEMPTS = 3;
+    private static final long LEASE_MS = 60_000L;
 
-    @Mock NotificationDeliveryRepository deliveries;
+    @Mock DeliveryTx tx;
     @Mock NotificationRequestRepository requests;
-    @Mock OutboxAppender outbox;
 
     private final SimpleMeterRegistry registry = new SimpleMeterRegistry();
 
     private DeliveryService service(List<NotificationSender> senders) {
-        return new DeliveryService(deliveries, requests, outbox, senders, registry, MAX_ATTEMPTS, BACKOFF);
+        return new DeliveryService(tx, requests, senders, registry, MAX_ATTEMPTS, BACKOFF, LEASE_MS);
     }
 
-    private NotificationDelivery emailDelivery() {
-        return NotificationDelivery.pending(UUID.randomUUID(), UUID.randomUUID(), UUID.randomUUID(),
+    /** A delivery already claimed for sending (status SENDING, lease stamped), with {@code priorAttempts} prior tries. */
+    private NotificationDelivery claimed(int priorAttempts) {
+        NotificationDelivery d = NotificationDelivery.pending(UUID.randomUUID(), UUID.randomUUID(), UUID.randomUUID(),
                 UUID.randomUUID(), UUID.randomUUID(), NotificationChannel.EMAIL, "a@acme.io", Instant.now());
+        for (int i = 0; i < priorAttempts; i++) {
+            d.markRetry("x", Instant.now(), Instant.now());
+        }
+        d.claim(UUID.randomUUID(), Instant.now().plusMillis(LEASE_MS), Instant.now());
+        return d;
     }
 
-    private NotificationSender okSender() throws Exception {
+    private NotificationSender okSender() {
         NotificationSender s = org.mockito.Mockito.mock(NotificationSender.class);
         when(s.channel()).thenReturn(NotificationChannel.EMAIL);
         return s;
@@ -73,99 +74,98 @@ class DeliveryServiceTest {
         return s;
     }
 
-    private void claim(NotificationDelivery d) {
-        when(deliveries.findPendingForUpdate(d.getId())).thenReturn(Optional.of(d));
-        when(requests.findById(d.getRequestEventId())).thenReturn(Optional.of(org.mockito.Mockito.mock(NotificationRequest.class)));
+    private void haveRequest(NotificationDelivery d) {
+        when(requests.findById(d.getRequestEventId()))
+                .thenReturn(Optional.of(org.mockito.Mockito.mock(NotificationRequest.class)));
     }
 
     @Test
-    void success_marksDeliveredAndPublishesDelivered() throws Exception {
-        NotificationDelivery d = emailDelivery();
-        claim(d);
+    void success_marksDeliveredAndCountsIt() {
+        NotificationDelivery d = claimed(0);
+        haveRequest(d);
+        when(tx.finalizeDelivered(eq(d.getId()), eq(d.getLeaseToken()), any())).thenReturn(true);
 
-        service(List.of(okSender())).fireDelivery(d.getId());
+        service(List.of(okSender())).sendClaimed(d);
 
-        assertThat(d.getStatus()).isEqualTo(DeliveryStatus.DELIVERED);
-        verify(outbox).append(eq("notification"), any(), eq(Topics.NOTIFICATION_DELIVERED), any(),
-                any(NotificationDeliveredEvent.class));
+        verify(tx).finalizeDelivered(eq(d.getId()), eq(d.getLeaseToken()), any());
         assertThat(registry.counter("notification.delivery.success").count()).isEqualTo(1.0);
     }
 
     @Test
-    void firstFailure_retriesWithOneBackoffStep_noTerminalEvent() throws Exception {
-        NotificationDelivery d = emailDelivery(); // attempts = 0
-        claim(d);
+    void deliveredButLeaseLost_doesNotCount() {
+        NotificationDelivery d = claimed(0);
+        haveRequest(d);
+        // Fencing: the row was reclaimed by another worker (lease expired) -> finalize reports not-owned.
+        when(tx.finalizeDelivered(eq(d.getId()), eq(d.getLeaseToken()), any())).thenReturn(false);
 
-        service(List.of(throwingSender())).fireDelivery(d.getId());
+        service(List.of(okSender())).sendClaimed(d);
 
-        assertThat(d.getStatus()).isEqualTo(DeliveryStatus.PENDING); // not terminal
-        assertThat(d.getAttempts()).isEqualTo(1);
-        // attemptJustMade=1 -> next = now + 1*backoff.
-        assertThat(Duration.between(d.getLastAttemptAt(), d.getNextAttemptAt()).toMillis()).isEqualTo(BACKOFF);
-        verifyNoInteractions(outbox);
+        assertThat(registry.counter("notification.delivery.success").count()).isEqualTo(0.0);
+    }
+
+    @Test
+    void firstFailure_retriesWithOneBackoffStep_noTerminal() throws Exception {
+        NotificationDelivery d = claimed(0); // attempts = 0
+        haveRequest(d);
+
+        service(List.of(throwingSender())).sendClaimed(d);
+
+        ArgumentCaptor<Instant> next = ArgumentCaptor.forClass(Instant.class);
+        ArgumentCaptor<Instant> now = ArgumentCaptor.forClass(Instant.class);
+        // attemptJustMade = 1 -> next = now + 1*backoff.
+        verify(tx).finalizeRetry(eq(d.getId()), eq(d.getLeaseToken()), any(), next.capture(), now.capture());
+        assertThat(Duration.between(now.getValue(), next.getValue()).toMillis()).isEqualTo(BACKOFF);
+        verify(tx, never()).finalizeFailure(any(), any(), any(), any());
     }
 
     @Test
     void secondFailure_backoffScalesLinearly() throws Exception {
-        NotificationDelivery d = emailDelivery();
-        d.markRetry("x", Instant.now(), Instant.now()); // attempts = 1
-        claim(d);
+        NotificationDelivery d = claimed(1); // attempts = 1
+        haveRequest(d);
 
-        service(List.of(throwingSender())).fireDelivery(d.getId());
+        service(List.of(throwingSender())).sendClaimed(d);
 
-        assertThat(d.getAttempts()).isEqualTo(2);
-        // attemptJustMade=2 -> next = now + 2*backoff.
-        assertThat(Duration.between(d.getLastAttemptAt(), d.getNextAttemptAt()).toMillis()).isEqualTo(2 * BACKOFF);
-        verifyNoInteractions(outbox);
+        ArgumentCaptor<Instant> next = ArgumentCaptor.forClass(Instant.class);
+        ArgumentCaptor<Instant> now = ArgumentCaptor.forClass(Instant.class);
+        // attemptJustMade = 2 -> next = now + 2*backoff.
+        verify(tx).finalizeRetry(eq(d.getId()), eq(d.getLeaseToken()), any(), next.capture(), now.capture());
+        assertThat(Duration.between(now.getValue(), next.getValue()).toMillis()).isEqualTo(2 * BACKOFF);
     }
 
     @Test
-    void exhaustedAttempts_marksFailedAndPublishesFailed() throws Exception {
-        NotificationDelivery d = emailDelivery();
-        d.markRetry("x", Instant.now(), Instant.now()); // attempts = 1
-        d.markRetry("x", Instant.now(), Instant.now()); // attempts = 2
-        claim(d);
+    void exhaustedAttempts_marksFailedAndCountsIt() throws Exception {
+        NotificationDelivery d = claimed(2); // attempts = 2 -> attemptJustMade = 3 >= max
+        haveRequest(d);
+        when(tx.finalizeFailure(eq(d.getId()), eq(d.getLeaseToken()), any(), any())).thenReturn(true);
 
-        service(List.of(throwingSender())).fireDelivery(d.getId());
+        service(List.of(throwingSender())).sendClaimed(d);
 
-        // attemptJustMade = 2+1 = 3 >= max -> terminal.
-        assertThat(d.getStatus()).isEqualTo(DeliveryStatus.FAILED);
-        verify(outbox).append(eq("notification"), any(), eq(Topics.NOTIFICATION_FAILED), any(),
-                any(NotificationFailedEvent.class));
+        verify(tx).finalizeFailure(eq(d.getId()), eq(d.getLeaseToken()), any(), any());
+        verify(tx, never()).finalizeRetry(any(), any(), any(), any(), any());
         assertThat(registry.counter("notification.delivery.failure").count()).isEqualTo(1.0);
     }
 
     @Test
-    void claimEmpty_doesNothing() {
-        UUID id = UUID.randomUUID();
-        when(deliveries.findPendingForUpdate(id)).thenReturn(Optional.empty());
-
-        service(List.of()).fireDelivery(id);
-
-        verifyNoInteractions(outbox);
-        verify(deliveries, never()).save(any());
-    }
-
-    @Test
     void noSenderForChannel_failsWithoutWastingRetries() {
-        NotificationDelivery d = emailDelivery();
-        claim(d);
+        NotificationDelivery d = claimed(0);
+        haveRequest(d);
+        when(tx.finalizeFailure(eq(d.getId()), eq(d.getLeaseToken()), any(), any())).thenReturn(true);
 
-        service(List.of()).fireDelivery(d.getId()); // no EMAIL sender registered
+        service(List.of()).sendClaimed(d); // no EMAIL sender registered
 
-        assertThat(d.getStatus()).isEqualTo(DeliveryStatus.FAILED);
-        verify(outbox).append(any(), any(), eq(Topics.NOTIFICATION_FAILED), any(), any());
+        verify(tx).finalizeFailure(eq(d.getId()), eq(d.getLeaseToken()), any(), any());
+        verify(tx, never()).finalizeRetry(any(), any(), any(), any(), any());
+        assertThat(registry.counter("notification.delivery.failure").count()).isEqualTo(1.0);
     }
 
     @Test
     void missingRequest_failsDelivery() {
-        NotificationDelivery d = emailDelivery();
-        when(deliveries.findPendingForUpdate(d.getId())).thenReturn(Optional.of(d));
+        NotificationDelivery d = claimed(0);
         when(requests.findById(d.getRequestEventId())).thenReturn(Optional.empty());
+        when(tx.finalizeFailure(eq(d.getId()), eq(d.getLeaseToken()), any(), any())).thenReturn(true);
 
-        service(List.of()).fireDelivery(d.getId());
+        service(List.of()).sendClaimed(d);
 
-        assertThat(d.getStatus()).isEqualTo(DeliveryStatus.FAILED);
-        verify(outbox).append(any(), any(), eq(Topics.NOTIFICATION_FAILED), any(), any());
+        verify(tx).finalizeFailure(eq(d.getId()), eq(d.getLeaseToken()), any(), any());
     }
 }
