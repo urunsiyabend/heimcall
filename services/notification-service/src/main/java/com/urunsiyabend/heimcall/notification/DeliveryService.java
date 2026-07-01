@@ -64,13 +64,27 @@ public class DeliveryService {
         this.lease = Duration.ofMillis(leaseMs);
         this.deliverySuccess = registry.counter("notification.delivery.success");
         this.deliveryFailure = registry.counter("notification.delivery.failure");
+        // Phase 20 T3: Micrometer's publishPercentileHistogram() defaults to a 1ms..30s bucket range, so
+        // under load (measured e2e avg ~80s, 2026-06-26) p95/p99 pinned at the 30s ceiling and the real tail
+        // was invisible. Extend maximumExpectedValue past the latencies the system actually hits and add
+        // explicit SLO boundaries so tail quantiles read true and alerting has named thresholds.
         this.deliveryLatency = Timer.builder("notification.delivery.latency")
                 .description("notification stage latency: request received -> delivered")
                 .publishPercentileHistogram()
+                .minimumExpectedValue(Duration.ofMillis(5))
+                .maximumExpectedValue(Duration.ofMinutes(2))
+                .serviceLevelObjectives(
+                        Duration.ofSeconds(1), Duration.ofSeconds(5), Duration.ofSeconds(10),
+                        Duration.ofSeconds(30), Duration.ofSeconds(60), Duration.ofSeconds(120))
                 .register(registry);
         this.e2eLatency = Timer.builder("notification.e2e.latency")
                 .description("end-to-end latency: originating alert occurredAt -> delivered")
                 .publishPercentileHistogram()
+                .minimumExpectedValue(Duration.ofMillis(10))
+                .maximumExpectedValue(Duration.ofMinutes(5))
+                .serviceLevelObjectives(
+                        Duration.ofSeconds(5), Duration.ofSeconds(15), Duration.ofSeconds(30),
+                        Duration.ofSeconds(60), Duration.ofSeconds(120), Duration.ofSeconds(300))
                 .register(registry);
     }
 
