@@ -2296,21 +2296,39 @@ even the throttled 100 incidents/s demands ~200 deliveries/s against an 87/s cei
     crash. Note: the delivery stage was loaded directly, not through the full k6 pipeline, because the gateway
     rate-limit caps the pipeline at ~100/s (T4) — it cannot exercise delivery at 600/s. e2e-latency-off-30s is
     T3 (the histogram bucket ceiling is a separate, still-open item).
-- **T2 - Partition the remaining single-partition topics.** `alert.received.v1` + `incident.lifecycle.v1`
-  are still `PartitionCount=1` (Phase 18 T3 only did `notification.requested.v1`) → incident/escalation
-  consumers cannot scale horizontally; the next ceiling once delivery is unlocked and the gateway cap is
-  raised. Provision N partitions **at creation** (`NewTopic` bean), key = the existing ordering key
-  (`alert.received.v1` by org/dedupKey, `incident.lifecycle.v1` by incidentId), raise consumer concurrency
-  to match. Never live-ALTER a keyed topic (rehashes keys, breaks order) — fresh envs get N from the bean;
-  dev ALTER caveat documented (as in Phase 18 T3). Acceptance: incident-consume rate scales past 100/s.
-- **T3 - Extend latency histogram buckets.** The `notification_delivery_latency` + `notification_e2e_latency`
-  histograms max out at 30s, so p95/p99 were pinned and the real tail (avg ~80s under load) was invisible.
-  Add SLO-driven buckets out to the latencies the system actually hits. Acceptance: tail quantiles read true
-  values under load, not the ceiling.
-- **T4 - Gateway rate-limit review.** The per-key token bucket (20 keys × replenish 5/s = ~100/s) is the
-  first wall *and* currently below delivery demand. Document it as the deliberate first ceiling; consider
-  per-org vs per-key keying and env-driven defaults so a load run can exercise the chain past 100/s.
-  Acceptance: documented; defaults tunable for load runs without code change.
+- **T2 (DONE) - Partition the remaining single-partition topics.** `alert.received.v1` +
+  `incident.lifecycle.v1` were still `PartitionCount=1` (Phase 18 T3 only did `notification.requested.v1`) →
+  incident/escalation consumers could not scale horizontally. Added a `NewTopic` bean per topic (mirroring
+  Phase 18 T3): incident-service `alertReceivedTopic` (`heimcall.alert-received-topic.partitions:4`, keyed by
+  dedupKey), escalation-service `incidentLifecycleTopic` (`heimcall.incident-lifecycle-topic.partitions:4`,
+  keyed by incidentId — preserves the Phase 12 lifecycle ordering within a partition). Raised each consumer's
+  `spring.kafka.listener.concurrency` to 4 (`INCIDENT_ALERT_CONSUMER_CONCURRENCY` /
+  `ESCALATION_INCIDENT_CONSUMER_CONCURRENCY`); on incident-service this applies only to the default factory
+  (alert-received listener) — the notification-feedback + ruleset-snapshot listeners keep their custom
+  single-thread factories. Never live-ALTER a keyed topic (rehashes keys, breaks order) — fresh envs get N
+  from the bean; an existing 1-partition dev topic must be recreated. **Verified (2026-07-01, real
+  Kafka+PG):** deleted both 1-partition dev topics, rebuilt bootJars, booted both services → recreated at
+  `PartitionCount: 4`; each consumer group ran **4 distinct threads across partitions 0–3** (assignment
+  confirmed via `kafka-consumer-groups --describe`). Acceptance met (consume scales past the single-thread cap).
+- **T3 (DONE) - Extend latency histogram buckets.** `notification.delivery.latency` +
+  `notification.e2e.latency` used Micrometer's `publishPercentileHistogram()` default 1ms..30s range, so
+  under load (e2e avg ~80s) p95/p99 pinned at the 30s ceiling. Raised `maximumExpectedValue` +
+  added explicit SLO boundaries: delivery (stage) min 5ms / **max 2m** / SLOs 1,5,10,30,60,120s; e2e (full
+  chain) min 10ms / **max 5m** / SLOs 5,15,30,60,120,300s. **Verified (2026-07-01):** scraped
+  `/actuator/prometheus` — `notification_delivery_latency_seconds_bucket` runs to `le="120.0"`,
+  `notification_e2e_latency_seconds_bucket` to `le="300.0"` (SLO boundaries present). Tail no longer pinned.
+- **T4 (DONE) - Gateway rate-limit review.** The per-key token bucket (20 keys × replenish 5/s ≈ 100/s) is
+  the deliberate first ceiling, not a capacity limit. Documented in `api-gateway/application.yml`: the
+  ceiling formula, the load-run override knobs (`RL_REPLENISH_RATE` / `RL_BURST_CAPACITY` — no code change),
+  and the **per-key vs per-org keying decision** — org is not known at the gateway without a key→org resolve
+  round-trip (async in the reactive filter → added latency + the coupling the ingest path avoids), so the
+  integration key is the natural tenant-proxy at the edge; per-org fairness is a downstream concern where org
+  is known (integration-service post-resolve). *Rejected:* per-org keying at the gateway (needs the lookup);
+  raising the default (kept conservative — overridable per load run). **Verified (2026-07-01):** gateway
+  booted with `RL_REPLENISH_RATE=1000` → 40-req burst = 0×429 (default 5/10 429s after ~10, per Phase 14 T1).
+  Acceptance met (documented; tunable without code change).
+
+**Phase 20 complete (T1–T4).**
 
 ### Research notes (researched 2026-06-26)
 

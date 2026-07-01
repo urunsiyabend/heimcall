@@ -47,8 +47,21 @@ spring:
           uri: ${INTEGRATION_URI:http://localhost:8081}
           predicates:
             - Path=/v1/integrations/**
-          # Phase 14 T1: Redis token-bucket rate limit, keyed per integrationKey. Over-limit -> 429.
-          # Conservative dev defaults; override via RL_REPLENISH_RATE / RL_BURST_CAPACITY.
+          # Phase 14 T1 / reviewed Phase 20 T4: Redis token-bucket rate limit, keyed per integrationKey.
+          # Over-limit -> 429.
+          #
+          # Deliberate first ceiling: aggregate accept throughput is ~ replenishRate x (active keys). With
+          # the conservative dev default (5/s) and a 20-key load profile that is ~100/s — intentionally the
+          # first wall in the chain, and (pre-Phase-20) it sat below the downstream delivery capacity. It is
+          # NOT a capacity limit: raise it for a load run with no code change via RL_REPLENISH_RATE /
+          # RL_BURST_CAPACITY (e.g. RL_REPLENISH_RATE=1000 to exercise the chain past 100/s).
+          #
+          # Keyed per integrationKey, not per org: the org is not known at the gateway without a key->org
+          # resolve round-trip to identity (async in the reactive filter -> added latency + the very coupling
+          # the ingest path avoids). The integration key is the natural tenant-proxy here (issued per
+          # integration per org), so per-key throttling isolates tenants without that lookup. Per-org fairness
+          # (one tenant's many keys sharing one bucket) is a downstream concern, enforced where org is known
+          # (integration-service post-resolve), not at the edge.
           filters:
             - name: RequestRateLimiter
               args:
