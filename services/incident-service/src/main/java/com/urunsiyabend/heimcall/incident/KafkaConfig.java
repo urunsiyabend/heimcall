@@ -2,14 +2,18 @@ package com.urunsiyabend.heimcall.incident;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.urunsiyabend.heimcall.common.events.RoutingRulesetSnapshotEvent;
+import com.urunsiyabend.heimcall.common.events.Topics;
+import org.apache.kafka.clients.admin.NewTopic;
 import org.apache.kafka.clients.consumer.ConsumerConfig;
 import org.apache.kafka.common.serialization.ByteArraySerializer;
 import org.apache.kafka.common.serialization.StringDeserializer;
 import org.apache.kafka.common.serialization.StringSerializer;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.autoconfigure.kafka.KafkaProperties;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.kafka.config.ConcurrentKafkaListenerContainerFactory;
+import org.springframework.kafka.config.TopicBuilder;
 import org.springframework.kafka.core.ConsumerFactory;
 import org.springframework.kafka.core.DefaultKafkaConsumerFactory;
 import org.springframework.kafka.core.DefaultKafkaProducerFactory;
@@ -49,6 +53,25 @@ public class KafkaConfig {
     // 3 total delivery attempts (1 initial + 2 retries), 1s apart.
     private static final long RETRY_INTERVAL_MS = 1000L;
     private static final long MAX_RETRIES = 2L;
+
+    /**
+     * Phase 20 T2: provision {@code alert.received.v1} with N partitions up front so the alert-received
+     * consumer group can scale past one active thread (the {@code spring.kafka.listener.concurrency}
+     * setting has partitions to spread across). Keyed by dedupKey (set by the integration relay), so
+     * per-alert dedup/occurrence ordering is preserved within a partition while distinct alerts fan out
+     * across the group. Provisioned at creation, never ALTERed live: adding partitions to a keyed topic
+     * rehashes keys and breaks ordering — a fresh environment gets N from the start (dev volumes with an
+     * existing 1-partition topic must be recreated to pick up N; see docs/00-current-state.md).
+     */
+    @Bean
+    public NewTopic alertReceivedTopic(
+            @Value("${heimcall.alert-received-topic.partitions:4}") int partitions,
+            @Value("${heimcall.alert-received-topic.replicas:1}") int replicas) {
+        return TopicBuilder.name(Topics.ALERT_RECEIVED)
+                .partitions(partitions)
+                .replicas(replicas)
+                .build();
+    }
 
     @Bean
     public ProducerFactory<String, Object> dltProducerFactory(KafkaProperties properties) {
