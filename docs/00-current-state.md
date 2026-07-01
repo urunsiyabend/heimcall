@@ -535,11 +535,20 @@ overridable via `HEIMCALL_JWT_SECRET`. The api-gateway also needs `HEIMCALL_UI_O
 
 ## 8. Next sprint
 
-**Now: Phase 17 T1+T2 complete (routing rule engine + local read-model).** Candidate next work:
-Phase 17 **T3** (CEL advanced-expression mode behind the `RoutingPredicateEvaluator` seam; draft-vs-published
-rulesets; shadow/overlap UI analysis); a **full 4-service live-fleet e2e** of catalog-write→snapshot→local-route;
-a routing-rules authoring **UI** in `web/`; helm/k8s wiring for catalog's new Kafka producer + the
-`routing.ruleset-published.v1` topic. (History below is Phase 7-era and retained for context.)
+**Now: Phase 20 complete (notification delivery throughput — parallel worker + partitioning + latency
+buckets + rate-limit review).** Phases 17 (routing rule engine, T1+T2), 18 (throughput, T1–T3), 19
+(observability, T1–T5), 20 (delivery throughput, T1–T4) all done. **Open next work:**
+- **Phase 18 T0** — commit the load-test harness (currently ad-hoc scratchpad k6).
+- **Phase 18 T4** — ingest accept-path throughput (the ~100/s gateway cap is a configured rate limit, not
+  capacity; T4 measures the path itself once the limit is lifted).
+- **Phase 17 T3 (deferred)** — CEL advanced-expression mode behind the `RoutingPredicateEvaluator` seam;
+  draft-vs-published rulesets; shadow/overlap UI analysis.
+- **Cross-cutting / infra backlog**: full 4-service live-fleet e2e of catalog-write→snapshot→local-route;
+  routing-rules authoring **UI** in `web/`; helm/k8s wiring for catalog's Kafka producer +
+  `routing.ruleset-published.v1` topic; cross-cutting hardening (Redis caches/cooldown, `processed_event`
+  TTL, `reassign` + `IncidentAssignment`).
+
+(History below is Phase 7-era and retained for context.)
 
 Phases 1 + 3 + 4 + 5 + 6 + 7 complete; the trigger->notify loop is closed end to end, incidents have
 real lifecycle REST commands, and a React UI (`web/`) drives auth + incident triage with live SSE
@@ -774,7 +783,7 @@ the compose PG — revisit if CI needs container-isolated tests.
 Plus cross-cutting hardening still open (Redis caches/cooldown, `processed_event` TTL,
 `reassign` + `IncidentAssignment`; JWT secret rotation/RS256 now closed by Phase 16 T1).
 
-**Phase 17 - Routing Rule Engine** (specced 2026-06-25, not built — next). Replaces the flat
+**Phase 17 - Routing Rule Engine** (T1+T2 done, 2026-06-26). Replaces the flat
 `routingKey -> service -> policy` map (+ Phase 10 T2 org-default) with an ordered, conditional **decision
 table**: typed condition tree (ALL/ANY/NOT + field/operator/value, no expression language; CEL deferred
 behind an interface), first-match-wins, with the catch-all as a separate `fallbackAction` (not a rule) so
@@ -799,8 +808,8 @@ serializer** (`DelegatingByTypeSerializer` exact-match over an unordered map) th
 so the recoverer's republish failed → infinite redelivery, `delivered=0`; fixed with `LinkedHashMap` +
 `assignable=true` (ported from incident-service). **T3**: `notification.requested.v1` provisioned with N
 partitions up front (`NewTopic` bean, default 4) + consumer concurrency 4, key=incidentId → **~4.5x** on
-spread load (an existing single-partition backlog does NOT parallelize). Remaining: `alert.received.v1` +
-lifecycle topics still 1 partition; T0 harness + T4 ingest path open. See plan Phase 18.
+spread load (an existing single-partition backlog does NOT parallelize). `alert.received.v1` + lifecycle
+topics were partitioned later in Phase 20 T2 (4p each). Remaining: T0 harness + T4 ingest path open. See plan Phase 18.
 
 **Phase 19 - Observability for throughput & flow** (T1–T5 done, 2026-06-26). Phase 18 exposed that the
 event pipeline had no graphable metric for relay publish rate, per-stage rate, consumer lag, or delivery —

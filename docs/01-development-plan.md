@@ -2043,7 +2043,8 @@ the 2026-06-25 run and must move it.
   rate to ~100/s once p1–p3 drained). Partitions speed up new/spread load, not data already committed to
   one partition. Provisioning is at creation, never live-ALTER (rehashes keys, breaks order) — fresh envs
   get N from the `NewTopic` bean; this dev env was ALTERed once (ordering caveat accepted for the
-  experiment). Remaining: `alert.received.v1` + incident lifecycle topics still `PartitionCount=1`.
+  experiment). **Now fully DONE:** `alert.received.v1` + `incident.lifecycle.v1` were partitioned (4p each)
+  later in **Phase 20 T2** (`NewTopic` beans + consumer concurrency 4, keyed by dedupKey / incidentId).
 - **T4 - Ingest accept path.** Hikari sizing + Redis-cached key resolution. Acceptance: accept p95 < 2s
   (PRD incident-creation SLA budget) at the throughput T1/T3 unlock; no 503 from identity timeouts.
 
